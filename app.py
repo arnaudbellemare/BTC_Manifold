@@ -85,10 +85,12 @@ def fetch_kraken_data(symbol, timeframe, start_date, end_date):
 def fit_garch(returns, p=1, q=1):
     try:
         model = arch_model(returns, vol='Garch', p=p, q=q, mean='Constant').fit(disp='off')
-        return model.conditional_volatility / 100, model.params.get('mu', 0.0) / 100
+        sigma = np.clip(model.conditional_volatility / 100, 1e-6, 1.0)  # Cap volatility
+        mu = np.clip(model.params.get('mu', 0.0) / 100, -0.1, 0.1)  # Cap drift
+        return sigma, mu
     except:
         st.warning("GARCH failed. Using constant volatility.")
-        return np.full(len(returns), returns.std() / 100), returns.mean() / 100
+        return np.full(len(returns), np.clip(returns.std() / 100, 1e-6, 1.0)), np.clip(returns.mean() / 100, -0.1, 0.1)
 
 def compute_geodesic(metric, t, p0, pT, T):
     manifold = CustomManifold(dim=2, metric=metric)
@@ -100,7 +102,7 @@ def compute_single_path(p0, T, N, dt, drift, diffusion, rng_seed):
     np.random.seed(rng_seed)
     path = np.zeros((N, 2))
     path[0, :] = [0.0, p0]
-    price_std = 10.0  # Clamp log-price to ±10 std deviations
+    price_std = 5.0  # Tighter clamp for log-price
     for j in range(N - 1):
         pos = path[j, :]
         dW = np.random.normal(0, np.sqrt(dt))
@@ -111,23 +113,25 @@ def compute_single_path(p0, T, N, dt, drift, diffusion, rng_seed):
     return path[:, 1]
 
 def simulate_paths_manifold(metric, p0, T, N, n_paths, subsample_factor=0.2):
-    N_coarse = max(int(N * subsample_factor), 50)
+    N_coarse = max(int(N * subsample_factor), 100)  # Increased minimum to stabilize dt
     dt = T / (N_coarse - 1)
     t_coarse = np.linspace(0, T, N_coarse)
     
     sigma = np.array([metric.sigma_interp(ti) for ti in t_coarse])
     mu = np.array([metric.mu_interp(ti) for ti in t_coarse])
+    sigma = np.clip(sigma, 1e-6, 1.0)  # Cap volatility
+    mu = np.clip(mu, -0.1, 0.1)  # Cap drift
     det = 1.0 * sigma**2 - mu**2
     det = np.maximum(det, 1e-6)
     g_inv_22 = 1.0 / det
     drift = np.vstack([np.ones(N_coarse), mu]).T
     diffusion = np.sqrt(g_inv_22)
     
-    # Validate sigma and mu
+    # Debug: Log sigma and mu ranges
     if np.any(~np.isfinite(sigma)) or np.any(~np.isfinite(mu)):
         st.warning("Invalid GARCH parameters detected. Using constant values.")
-        sigma = np.full_like(sigma, np.mean(sigma[np.isfinite(sigma)]))
-        mu = np.full_like(mu, np.mean(mu[np.isfinite(mu)]))
+        sigma = np.full_like(sigma, np.clip(np.mean(sigma[np.isfinite(sigma)]), 1e-6, 1.0))
+        mu = np.full_like(mu, np.clip(np.mean(mu[np.isfinite(mu)]), -0.1, 0.1))
         det = 1.0 * sigma**2 - mu**2
         det = np.maximum(det, 1e-6)
         g_inv_22 = 1.0 / det
@@ -145,15 +149,14 @@ def simulate_paths_manifold(metric, p0, T, N, n_paths, subsample_factor=0.2):
         for i in range(n_paths):
             paths_coarse[i, :] = compute_single_path(p0, T, N_coarse, dt, drift, diffusion, i)
     
+    # Validate paths_coarse before interpolation
+    paths_coarse = np.where(np.isfinite(paths_coarse), paths_coarse, p0)
+    
     t = np.linspace(0, T, N)
     paths = np.zeros((n_paths, N))
     for i in range(n_paths):
-        if np.any(~np.isfinite(paths_coarse[i])):
-            st.warning(f"Path {i} contains invalid values. Replacing with initial price.")
-            paths[i, :] = p0
-        else:
-            interp = interp1d(t_coarse, paths_coarse[i], bounds_error=False, fill_value=p0)
-            paths[i, :] = interp(t)
+        interp = interp1d(t_coarse, paths_coarse[i], bounds_error=False, fill_value=p0)
+        paths[i, :] = np.clip(interp(t), p0 - 5.0, p0 + 5.0)  # Additional clamping
     
     return paths, t
 
@@ -169,13 +172,17 @@ def compute_critical_levels(metric, t_grid, p_grid, n_levels=4):
             laplacian[idx, idx] = -2 * np.sum(g_inv)
             if j > 0: laplacian[idx, idx - 1] = g_inv[1, 1]
             if j < N_p - 1: laplacian[idx, idx + 1] = g_inv[1, 1]
-    _, eigenvectors = eigs(laplacian, k=n_levels, which='SM')
-    levels = []
-    for ev in eigenvectors.T:
-        ev_grid = ev.reshape(N_t, N_p)
-        peak_idx = np.argmax(np.abs(ev_grid[-1, :]))
-        levels.append(p_grid[peak_idx])
-    return np.array(levels)
+    try:
+        _, eigenvectors = eigs(laplacian, k=n_levels, which='SM')
+        levels = []
+        for ev in eigenvectors.T:
+            ev_grid = ev.reshape(N_t, N_p)
+            peak_idx = np.argmax(np.abs(ev_grid[-1, :]))
+            levels.append(p_grid[peak_idx])
+        return np.array(levels)
+    except:
+        st.warning("Laplacian eigenvalue computation failed. Using historical quantiles.")
+        return np.quantile(p_grid, np.linspace(0.2, 0.8, n_levels))
 
 def classify_regime(geodesic_df, prices, times):
     deviation = np.abs(geodesic_df['Price'].values - np.mean(prices))
@@ -237,11 +244,13 @@ if df is not None and len(df) > 50 and df['close'].std() > 1e-6:
 
     with st.spinner("Simulating price paths..."):
         paths, t = simulate_paths_manifold(metric, p0, T, N, n_paths, subsample_factor)
+        # Validate paths before exponentiation
+        paths = np.where(np.isfinite(paths), paths, p0)
         paths = np.exp(paths)  # Convert back to price
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        final_prices = np.exp(paths[:, -1])
+        final_prices = paths[:, -1]  # Already exponentiated
         if np.any(~np.isfinite(final_prices)):
             st.warning("Final prices contain NaNs or Infs. Filtering invalid values.")
             valid_mask = np.isfinite(final_prices)
