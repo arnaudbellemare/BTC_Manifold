@@ -77,7 +77,7 @@ n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, ste
 epsilon = st.sidebar.slider("Probability Integration Range ($)", 50, 500, 100, step=50)
 
 # Fetch data for July 1-7, 2025
-symbols = ['XBT/USD', 'BTC/USD', 'BTCUSDT', 'XBTUSDT']
+symbols = ['BTC/USD']
 timeframe = '1h'
 limit = 168  # 7 days * 24 hours
 start_date = pd.to_datetime("2025-07-01")
