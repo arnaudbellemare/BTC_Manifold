@@ -79,19 +79,25 @@ def visualize_manifold(sigma_data, t_grid, history_df):
     ranks = rankdata(rolling_sigma[:len(t_grid)], "average") / len(rolling_sigma[:len(t_grid)])
     viz_df = pd.DataFrame({'Time': t_grid, 'Rank': ranks})
     
+    # Convert t_grid to datetime for proper scaling
+    start_date = pd.to_datetime("2025-07-01")
+    end_date = pd.to_datetime("2025-07-07 23:59:59")
+    viz_df['Time'] = start_date + pd.to_timedelta(t_grid, unit='h')
+
     # Time slider
     time_brush = alt.selection_interval(bind='scales', encodings=['x'])
     
     # Gradient background
     gradient_background = alt.Chart(viz_df).mark_line(strokeWidth=300, opacity=0.8).encode(
-        x=alt.X('Time:Q', title="Time (hours)", scale=alt.Scale(domain=alt.DateTimeRange('2025-07-01', '2025-07-07'))),
+        x=alt.X('Time:T', title="Time (hours)", scale=alt.Scale(domain=[start_date, end_date])),
         y=alt.Y('mean(Rank):Q', axis=None),
         color=alt.Color('Rank:Q', scale=alt.Scale(scheme='viridis'), legend=alt.Legend(title="Volatility Percentile"))
     ).add_selection(time_brush)
 
-    # History line
+    # History line (ensure Time is in datetime format)
+    history_df['Time'] = pd.to_datetime(history_df['Time'], unit='s', origin=pd.Timestamp("1970-01-01"))
     history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2).encode(
-        x='Time:Q',
+        x='Time:T',
         y=alt.Y('Price:Q', title="Price", scale=alt.Scale(zero=False))
     ).transform_filter(time_brush)
 
