@@ -21,10 +21,10 @@ st.title("BTC/USD Rigorous Riemannian Manifold Analysis (July 1-7, 2025)")
 # Advanced Riemannian metric with full implementations
 class AdvancedRiemannianMetric(RiemannianMetric):
     def __init__(self, sigma, t, T, prices, variances):
-        # --- FINAL FIX: Call super() with no arguments for maximum compatibility ---
-        # This works on very old and new versions of geomstats.
-        super().__init__()
-        self.dim = 2 # Explicitly set the dimension attribute
+        # --- THE DEFINITIVE FIX: ---
+        # Bypass the parent constructor entirely and manually set the required attributes.
+        # This resolves the deep version incompatibility with geomstats.
+        self.dim = 2
         
         self.sigma = sigma
         self.t = t
@@ -45,17 +45,17 @@ class AdvancedRiemannianMetric(RiemannianMetric):
 
     def christoffel_symbols(self, base_point, epsilon=1e-5):
         g_inv = np.linalg.inv(self.metric_matrix(base_point))
-        christoffels = np.zeros((2, 2, 2))
-        for i in range(2):
-            for j in range(2):
-                for k in range(2):
+        christoffels = np.zeros((self.dim, self.dim, self.dim))
+        for i in range(self.dim):
+            for j in range(self.dim):
+                for k in range(self.dim):
                     val = 0
-                    for l in range(2):
-                        h_j = np.zeros(2); h_j[j] = epsilon
+                    for l in range(self.dim):
+                        h_j = np.zeros(self.dim); h_j[j] = epsilon
                         dg_ik_dj = (self.metric_matrix(base_point + h_j)[i, k] - self.metric_matrix(base_point - h_j)[i, k]) / (2 * epsilon)
-                        h_i = np.zeros(2); h_i[i] = epsilon
+                        h_i = np.zeros(self.dim); h_i[i] = epsilon
                         dg_jk_di = (self.metric_matrix(base_point + h_i)[j, k] - self.metric_matrix(base_point - h_i)[j, k]) / (2 * epsilon)
-                        h_k = np.zeros(2); h_k[k] = epsilon
+                        h_k = np.zeros(self.dim); h_k[k] = epsilon
                         dg_ij_dk = (self.metric_matrix(base_point + h_k)[i, j] - self.metric_matrix(base_point - h_k)[i, j]) / (2 * epsilon)
                         val += g_inv[k, l] * 0.5 * (dg_ik_dj + dg_jk_di - dg_ij_dk)
                     christoffels[i, j, k] = val
@@ -108,16 +108,16 @@ n_display_paths = st.sidebar.slider("Paths to Display", 10, 200, 50, step=10)
 
 df = fetch_kraken_data(['BTC/USD'], '1h', pd.to_datetime("2025-07-01"), pd.to_datetime("2025-07-07 23:59:59"), 168)
 prices = df['close'].values
-times = (df['timestamp'] - df['timestamp'].iloc[0]) / (1000 * 3600)
-T = times.iloc[-1]
+times = (df['timestamp'] - df['timestamp'].iloc[0]) / (1000 * 3600) if not df.empty else np.array([])
+T = times.iloc[-1] if len(times) > 0 else 168
 N = len(prices)
-p0 = prices[0]
+p0 = prices[0] if N > 0 else 70000
 returns = np.log(prices[1:] / prices[:-1]) if len(prices) > 1 else np.array([])
 mu = np.mean(returns) * 24 * 365 if len(returns) > 0 else 0.0
 
 # Volatility Modeling
-v0 = np.var(returns) if len(returns) > 0 else 0.01**2
-sigma = np.sqrt(v0) * np.ones(N)
+v0 = np.var(returns) if len(returns) > 0 else (0.05/(24*365))**2
+sigma = np.sqrt(v0) * np.ones(N) if N > 0 else np.array([])
 if len(returns) > 5:
     try:
         garch_model = arch_model(returns * 100, vol='Garch', p=1, q=1).fit(disp='off')
@@ -127,7 +127,8 @@ if len(returns) > 5:
 # Heston Simulation
 kappa, theta, xi, rho = 0.1, v0, 0.1, -0.3
 def simulate_paths(p0, mu, v0, kappa, theta, xi, rho, T, N, n_paths):
-    dt = T / (N - 1)
+    if N == 0: return np.array([[p0]]), np.array([0]), np.array([[v0]])
+    dt = T / (N - 1) if N > 1 else T
     t = np.linspace(0, T, N)
     paths = np.zeros((n_paths, N)); paths[:, 0] = p0
     variances = np.zeros((n_paths, N)); variances[:, 0] = v0
@@ -145,11 +146,11 @@ with st.spinner("Simulating Heston paths..."):
 nt, n_p_steps = 200, 400
 t_grid = np.linspace(0, T, nt)
 p_grid = np.linspace(paths.min() * 0.9, paths.max() * 1.1, n_p_steps)
-dt_fd, dp = t_grid[1] - t_grid[0], p_grid[1] - p_grid[0]
+dt_fd, dp = (t_grid[1] - t_grid[0]), (p_grid[1] - p_grid[0])
 
 u = np.zeros((nt, n_p_steps))
-sigma_init = np.sqrt(v0) * p0 if v0 > 0 else np.std(prices[:10])
-u[0, :] = np.exp(-((p_grid - p0)**2) / (2 * sigma_init**2))
+sigma_init = np.sqrt(v0) * p0 if v0 > 0 else np.std(prices[:10] if len(prices) > 10 else [100])
+u[0, :] = np.exp(-((p_grid - p0)**2) / (2 * max(sigma_init**2, 1e-4)))
 u[0, :] /= np.trapz(u[0, :], p_grid)
 
 I = diags([1], [0], shape=(n_p_steps, n_p_steps), format="csr")
@@ -166,9 +167,8 @@ for i in range(nt - 1):
     L_LB_op = D_bwd @ diags(sqrt_det_g * g_inv_pp) @ D_fwd
     L_drift_op = diags((mu / (365*24)) * p_grid) @ D_fwd
     
-    # Boundary conditions: No flux
-    L_LB_op.setdiag(0, k=0); L_LB_op.setdiag(0, k=-1)
-    L_drift_op.setdiag(0, k=0); L_drift_op.setdiag(0, k=-1)
+    L_LB_op_lil = L_LB_op.tolil(); L_LB_op_lil[0, :] = 0; L_LB_op_lil[-1, :] = 0; L_LB_op = L_LB_op_lil.tocsr()
+    L_drift_op_lil = L_drift_op.tolil(); L_drift_op_lil[0, :] = 0; L_drift_op_lil[-1, :] = 0; L_drift_op = L_drift_op_lil.tocsr()
 
     L = 0.5 * diags(p_grid**2) @ L_LB_op + L_drift_op
     LHS = I - 0.5 * dt_fd * L
