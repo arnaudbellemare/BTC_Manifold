@@ -9,8 +9,6 @@ from geomstats.numerics.geodesic import ExpODESolver
 from geomstats.numerics.ivp import ScipySolveIVP
 from scipy.integrate import solve_ivp
 from scipy.optimize import root
-from scipy.sparse import diags, csr_matrix
-from scipy.sparse.linalg import spsolve
 from sklearn.cluster import KMeans
 import time
 import warnings
@@ -88,7 +86,7 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
 
 # Parameters & Data Prep
 st.sidebar.header("Parameters")
-n_paths = st.sidebar.slider("Number of Paths", 100, 2000, 1000, step=100)
+n_paths = st.sidebar.slider("Number of Paths", 500, 5000, 2000, step=100)
 n_display_paths = st.sidebar.slider("Paths to Display", 10, 200, 50, step=10)
 k_clusters = st.sidebar.slider("Number of Price Clusters (K)", 2, 8, 4, step=1)
 
@@ -127,72 +125,26 @@ def simulate_paths_heston(p0, mu, v0, kappa, theta, xi, rho, T, N, n_paths):
 with st.spinner("Simulating Heston paths..."):
     paths, t, variances = simulate_paths_heston(p0, mu / (365*24), v0, kappa, theta, xi, rho, T, N, n_paths)
 
-# Fokker-Planck Solver with Stability Fixes
-nt, n_p_steps = 400, 500
-t_grid = np.linspace(0, T, nt)
-p_grid = np.linspace(paths.min() * 0.9, paths.max() * 1.1, n_p_steps)
-dt_fd, dp = (t_grid[1] - t_grid[0]), (p_grid[1] - p_grid[0])
-u = np.zeros((nt, n_p_steps))
-sigma_init = np.sqrt(v0) * p0 if v0 > 0 else np.std(prices[:10] if len(prices) > 10 else [100])
-u[0, :] = np.exp(-((p_grid - p0)**2) / (2 * max(sigma_init**2, 1e-4)))
-u[0, :] /= np.trapz(u[0, :], p_grid)
-I = diags([1], [0], shape=(n_p_steps, n_p_steps), format="csr")
-D_fwd = (1 / dp) * diags([-1, 1], [0, 1], shape=(n_p_steps, n_p_steps), format="csr")
-D_bwd = (1 / dp) * diags([-1, 1], [-1, 0], shape=(n_p_steps, n_p_steps), format="csr")
-metric_fp = AdvancedRiemannianMetric(sigma, t, T, prices, variances)
-with st.spinner("Solving Fokker-Planck on the manifold..."):
-    for i in range(nt - 1):
-        current_time = t_grid[i]
-        g_p = np.array([metric_fp.metric_matrix([current_time, p]) for p in p_grid])
-        g_inv_pp = 1 / g_p[:, 1, 1]
-        sqrt_det_g = np.sqrt(g_p[:, 1, 1])
-        L_LB_op = D_bwd @ diags(sqrt_det_g * g_inv_pp) @ D_fwd
-        diffusion_coeff = 0.5 * p_grid**2
-        max_diffusion = np.percentile(diffusion_coeff, 99)
-        clipped_diffusion_coeff = np.clip(diffusion_coeff, 0, max_diffusion)
-        L_diffusion = diags(clipped_diffusion_coeff) @ L_LB_op
-        L_drift_op = diags((mu / (365*24)) * p_grid) @ D_fwd
-        L_diffusion.setdiag(0, k=0); L_diffusion.setdiag(0, k=-1)
-        L_drift_op.setdiag(0, k=0); L_drift_op.setdiag(0, k=-1)
-        L = L_diffusion + L_drift_op
-        LHS = I - 0.5 * dt_fd * L
-        RHS = (I + 0.5 * dt_fd * L) @ u[i, :]
-        u_new = spsolve(LHS, RHS)
-        if not np.all(np.isfinite(u_new)):
-            st.warning(f"Numerical instability detected at step {i+1}. Halting Fokker-Planck evolution.")
-            u[i+1:, :] = u[i, :]
-            break
-        u[i + 1, :] = np.maximum(u_new, 0)
-        norm = np.trapz(u[i + 1, :], p_grid)
-        if norm > 1e-9: u[i + 1, :] /= norm
+# --- FOKKER-PLANCK SOLVER IS REMOVED ---
+# We now use the final points of the Monte Carlo simulation directly.
+# This is more robust and achieves the same goal.
 
-# --- K-MEANS CLUSTERING WITH ROBUST SAMPLING ---
-u_density = u[-1, :]
-expected_price = np.trapz(p_grid * u_density, p_grid)
+# --- K-MEANS CLUSTERING ON MONTE CARLO RESULTS ---
+# 1. Get the final price of each simulated path. This is our sample.
+final_prices = paths[:, -1]
+expected_price = np.mean(final_prices)
 
-# --- FIX: Re-normalize the density so its SUM is 1 for np.random.choice ---
-# 1. Check if the density is valid to prevent division by zero or NaN.
-density_sum = np.sum(u_density)
-if not np.isfinite(density_sum) or density_sum < 1e-9:
-    st.warning("Final probability density is unstable. Using uniform distribution for clustering.")
-    probabilities = np.ones_like(p_grid) / len(p_grid) # Fallback to uniform
-else:
-    # 2. Normalize so the sum is exactly 1.
-    probabilities = u_density / density_sum
-
-# 3. Sample using the correctly normalized probabilities.
-n_samples = 10000
-sampled_prices = np.random.choice(p_grid, size=n_samples, p=probabilities)
-kmeans = KMeans(n_clusters=k_clusters, random_state=42, n_init='auto').fit(sampled_prices.reshape(-1, 1))
+# 2. Run K-Means to find cluster centers on the final path data.
+kmeans = KMeans(n_clusters=k_clusters, random_state=42, n_init='auto').fit(final_prices.reshape(-1, 1))
 cluster_centers = sorted(kmeans.cluster_centers_.flatten())
 
-# 4. Classify centers and calculate probabilities based on cluster population
+# 3. Classify centers and calculate probabilities based on cluster population
 support_levels, resistance_levels = [], []
 support_probs, resistance_probs = [], []
 labels = kmeans.labels_
 for i, center in enumerate(cluster_centers):
     cluster_population = np.sum(labels == i)
-    probability = cluster_population / n_samples
+    probability = cluster_population / len(final_prices)
     if center < expected_price:
         support_levels.append(center)
         support_probs.append(probability)
@@ -230,7 +182,7 @@ resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=
 chart = (path_lines + geodesic_line + support_lines + resistance_lines).properties(title="Price Dynamics, Geodesic, Support (Green), and Resistance (Red)", width=800, height=500).interactive()
 
 st.altair_chart(chart, use_container_width=True)
-st.write(f"**Expected Final Price:** ${expected_price:,.2f}" if np.isfinite(expected_price) else "**Expected Final Price:** Calculation failed.")
+st.write(f"**Expected Final Price (from Monte Carlo):** ${expected_price:,.2f}" if np.isfinite(expected_price) else "**Expected Final Price:** Calculation failed.")
 st.write(f"**K-Means Price Clusters (k={k_clusters}):**")
 if support_levels:
     st.write("**Support Levels (BTC/USD):**")
