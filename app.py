@@ -102,11 +102,15 @@ def compute_single_path(p0, T, N, dt, drift, diffusion, rng_seed):
     np.random.seed(rng_seed)
     path = np.zeros((N, 2))
     path[0, :] = [0.0, p0]
+    price_std = 10.0  # Clamp log-price to ±10 std deviations
     for j in range(N - 1):
         pos = path[j, :]
         dW = np.random.normal(0, np.sqrt(dt))
         stoch_term = np.array([0.0, diffusion[j] * dW])
-        path[j + 1, :] = pos + drift[j] * dt + stoch_term
+        next_pos = pos + drift[j] * dt + stoch_term
+        # Clamp log-price to prevent overflow
+        next_pos[1] = np.clip(next_pos[1], p0 - price_std, p0 + price_std)
+        path[j + 1, :] = next_pos
     return path[:, 1]
 
 def simulate_paths_manifold(metric, p0, T, N, n_paths, subsample_factor=0.2):
@@ -122,6 +126,12 @@ def simulate_paths_manifold(metric, p0, T, N, n_paths, subsample_factor=0.2):
     drift = np.vstack([np.ones(N_coarse), mu]).T
     diffusion = np.sqrt(g_inv_22)
     
+    # Debug: Check for invalid sigma/mu
+    if np.any(~np.isfinite(sigma)) or np.any(~np.isfinite(mu)):
+        st.warning("Invalid GARCH parameters detected. Using constant values.")
+        sigma = np.full_like(sigma, np.mean(sigma[np.isfinite(sigma)]))
+        mu = np.full_like(mu, np.mean(mu[np.isfinite(mu)]))
+    
     paths_coarse = np.array(Parallel(n_jobs=-1)(
         delayed(compute_single_path)(p0, T, N_coarse, dt, drift, diffusion, i)
         for i in range(n_paths)
@@ -130,8 +140,12 @@ def simulate_paths_manifold(metric, p0, T, N, n_paths, subsample_factor=0.2):
     t = np.linspace(0, T, N)
     paths = np.zeros((n_paths, N))
     for i in range(n_paths):
-        interp = interp1d(t_coarse, paths_coarse[i], bounds_error=False, fill_value="extrapolate")
-        paths[i, :] = interp(t)
+        if np.any(~np.isfinite(paths_coarse[i])):
+            st.warning(f"Path {i} contains invalid values. Replacing with initial price.")
+            paths[i, :] = p0
+        else:
+            interp = interp1d(t_coarse, paths_coarse[i], bounds_error=False, fill_value=p0)
+            paths[i, :] = interp(t)
     
     return paths, t
 
@@ -157,12 +171,14 @@ def compute_critical_levels(metric, t_grid, p_grid, n_levels=4):
 
 def classify_regime(geodesic_df, prices, times):
     deviation = np.abs(geodesic_df['Price'].values - np.mean(prices))
+    if np.any(~np.isfinite(deviation)):
+        return "Unknown (Invalid Data)"
     if np.mean(deviation[-len(deviation)//4:]) > np.std(prices):
         return "Trending"
     return "Mean Reverting"
 
 def visualize_manifold(metric, t_grid, p_grid):
-    SCALING_FACTOR = 1 / np.max([metric.sigma_interp(ti)**2 for ti in t_grid]) * 1000
+    SCALING_FACTOR = 1 / np.max([metric.sigma_interp(ti)**2 for ti in t_grid if np.isfinite(metric.sigma_interp(ti))]) * 1000
     g_pp_values = []
     for t_val in t_grid:
         cost = metric.metric_matrix([t_val, 0])[1, 1]
@@ -190,7 +206,7 @@ start_date = end_date - pd.Timedelta(days=days_history)
 df = fetch_kraken_data('BTC/USD', '1h', start_date, end_date)
 
 if df is not None and len(df) > 50 and df['close'].std() > 1e-6:
-    prices = np.log(df['close'].values)  # Use log-price
+    prices = np.log(df['close'].values)
     times = (df['datetime'] - df['datetime'].iloc[0]).dt.total_seconds() / 3600
     T = times.iloc[-1]
     N = len(prices)
@@ -213,23 +229,38 @@ if df is not None and len(df) > 50 and df['close'].std() > 1e-6:
     col1, col2 = st.columns([2, 1])
     with col1:
         final_prices = np.exp(paths[:, -1])
-        kde = gaussian_kde(final_prices)
-        price_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
-        u = kde(price_grid)
-        u /= np.trapz(u, price_grid)
+        if np.any(~np.isfinite(final_prices)):
+            st.warning("Final prices contain NaNs or Infs. Filtering invalid values.")
+            valid_mask = np.isfinite(final_prices)
+            final_prices = final_prices[valid_mask]
+            if len(final_prices) < 10:
+                st.error("Too few valid prices for KDE. Using historical quantiles for S/R.")
+                final_prices = np.exp(prices)
+        
+        try:
+            kde = gaussian_kde(final_prices)
+            price_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
+            u = kde(price_grid)
+            u /= np.trapz(u, price_grid)
+        except:
+            st.warning("KDE failed. Using uniform distribution.")
+            u = np.ones_like(price_grid) / (price_grid.max() - price_grid.min())
 
         critical_levels = np.exp(compute_critical_levels(metric, t, np.linspace(prices.min(), prices.max(), 50)))
         support_levels = critical_levels[critical_levels <= np.median(critical_levels)]
         resistance_levels = critical_levels[critical_levels > np.median(critical_levels)]
 
-        epsilon = epsilon_factor * np.mean([np.sqrt(metric.metric_matrix([T, np.log(p)])[1, 1]) for p in price_grid])
+        epsilon = epsilon_factor * np.mean([np.sqrt(metric.metric_matrix([T, np.log(p)])[1, 1]) for p in price_grid if np.isfinite(np.log(p))])
         def get_hit_prob(level_list):
             probs = []
             for level in level_list:
-                mask = (price_grid >= level - epsilon) & (price_grid <= level + epsilon)
-                raw_prob = np.trapz(u[mask], price_grid[mask])
-                volume_element = np.sqrt(np.abs(np.linalg.det(metric.metric_matrix([T, np.log(level)]))))
-                probs.append(raw_prob * volume_element)
+                if np.isfinite(np.log(level)):
+                    mask = (price_grid >= level - epsilon) & (price_grid <= level + epsilon)
+                    raw_prob = np.trapz(u[mask], price_grid[mask])
+                    volume_element = np.sqrt(np.abs(np.linalg.det(metric.metric_matrix([T, np.log(level)]))))
+                    probs.append(raw_prob * volume_element)
+                else:
+                    probs.append(0.0)
             total_prob = sum(probs)
             return [p / total_prob for p in probs] if total_prob > 0 else [0] * len(probs)
         
@@ -244,7 +275,7 @@ if df is not None and len(df) > 50 and df['close'].std() > 1e-6:
         st.write(f"Market Regime: {regime}")
 
         path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} 
-                     for i in range(min(n_paths, n_display_paths)) for j in range(N)]
+                     for i in range(min(n_paths, n_display_paths)) for j in range(N) if np.isfinite(paths[i, j])]
         plot_df = pd.concat([pd.DataFrame(path_data), geodesic_df])
         support_df = pd.DataFrame({"Price": support_levels})
         resistance_df = pd.DataFrame({"Price": resistance_levels})
@@ -265,7 +296,7 @@ if df is not None and len(df) > 50 and df['close'].std() > 1e-6:
         st.altair_chart((manifold_heatmap + history_line).properties(height=300).interactive(), use_container_width=True)
 
         st.subheader("Analysis Summary")
-        st.metric("Expected Final Price", f"${np.mean(final_prices):,.2f}")
+        st.metric("Expected Final Price", f"${np.mean(final_prices[np.isfinite(final_prices)]):,.2f}")
         st.write("**Support Levels:**")
         if support_levels.size > 0:
             st.dataframe(pd.DataFrame({'Level': support_levels, 'Hit Probability': support_probs}).style.format({'Level': '${:,.2f}', 'Hit Probability': '{:.1%}'}))
