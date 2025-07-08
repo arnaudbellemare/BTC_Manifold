@@ -6,7 +6,6 @@ import altair as alt
 from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
-# Add this line with your other imports
 import warnings
 import time
 warnings.filterwarnings("ignore")
@@ -16,15 +15,17 @@ st.title("BTC/USD Price Analysis on Riemannian Manifold")
 # Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        super().__init__(dim=2)
+        super().__init__()  # Remove dim argument
         self.sigma = sigma
         self.t = t
         self.T = T
+        self._space = {'dim': 2}  # Define dimension for manifold
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
         idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         return np.diag([1.0, self.sigma[idx]**2])
+
 # Fetch Kraken data
 @st.cache_data
 def fetch_kraken_data(symbols, timeframe, limit):
@@ -57,15 +58,15 @@ def fetch_kraken_data(symbols, timeframe, limit):
                     st.warning(f"Invalid data for {symbol}: len={len(df)}, timestamps_valid={df['timestamp'].notnull().all()}, close_valid={df['close'].notnull().all()}, close_positive={df['close'].gt(0).all()} (attempt {attempt+1})")
             except ccxt.NetworkError as e:
                 st.warning(f"Network error for {symbol} (attempt {attempt+1}): {e}")
-                time.sleep(15)  # Increased delay
+                time.sleep(15)  # 15-second delay
             except Exception as e:
                 st.warning(f"Error for {symbol} (attempt {attempt+1}): {e}")
-    st.error("Failed to fetch valid data from Kraken after trying all symbols. Check API status or symbols at https://api.kraken.com/0/public/AssetPairs")
+    st.error("Failed to fetch valid data from Kraken. Check API status or symbols at https://api.kraken.com/0/public/AssetPairs")
     return None
 
 # Parameters
 st.sidebar.header("Parameters")
-n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 100, step=50)  # Reduced default
+n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 50, step=50)  # Low default
 n_bins = st.sidebar.slider("Number of Bins for Density", 20, 100, 50, step=5)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
 
@@ -108,7 +109,7 @@ else:
     st.stop()
 
 p0 = prices[0]
-T = times.iloc[-1] # Safe after validation
+T = times[-1]  # Safe after validation
 N = len(prices)
 mu = np.mean(returns) * N / T / 100 if len(returns) > 0 else 0.0
 
