@@ -5,7 +5,6 @@ import pandas as pd
 import altair as alt
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
-from geomstats.numerics.geodesic import ExpODESolver
 from geomstats.numerics.ivp import ScipySolveIVP
 from scipy.integrate import solve_ivp
 from scipy.stats import gaussian_kde
@@ -19,22 +18,42 @@ st.title("BTC/USD Price Analysis on a Volatility-Weighted Manifold")
 # Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        # --- THE DEFINITIVE FIX FOR GEOMSTATS COMPATIBILITY ---
-        # The parent constructor is NOT called. We manually set the required attributes.
-        # This works on all versions of the library.
+        # The definitive compatibility fix for old geomstats versions
         self.dim = 2
-        
         self.sigma = sigma
         self.t = t
         self.T = T
-        self.exp_solver = ExpODESolver(self)
+        # We will not use the high-level geodesic function, so no exp_solver is needed here.
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
-        # Ensure index is within bounds for the sigma array
         idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         sigma_val = max(self.sigma[idx], 0.01)
         return np.diag([1.0, sigma_val**2])
+
+    # --- FIX: Add the required method to calculate curvature terms for the geodesic ---
+    def christoffel_symbols(self, base_point):
+        t_val = base_point[0]
+        g_inv = np.linalg.inv(self.metric_matrix(base_point))
+        
+        # Numerically calculate the derivative of sigma
+        eps = 1e-6
+        idx_plus = int(np.clip((t_val + eps) / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
+        idx_minus = int(np.clip((t_val - eps) / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
+        
+        sigma_plus = self.sigma[idx_plus]
+        sigma_minus = self.sigma[idx_minus]
+        
+        d_sigma_dt = (sigma_plus - sigma_minus) / (2 * eps)
+        sigma_val = self.sigma[int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))]
+        
+        # For this diagonal metric, only a few Christoffel symbols are non-zero
+        gamma = np.zeros((2, 2, 2))
+        gamma[0, 1, 1] = -sigma_val * d_sigma_dt  # Corresponds to Γ^p_tt
+        gamma[1, 0, 1] = g_inv[1, 1] * sigma_val * d_sigma_dt # Corresponds to Γ^t_pt
+        gamma[1, 1, 0] = gamma[1, 0, 1]
+        
+        return gamma
 
 # Fetch Kraken data (robust version)
 @st.cache_data
@@ -65,7 +84,6 @@ n_display_paths = st.sidebar.slider("Number of Paths to Display", 10, 200, 50, s
 epsilon_factor = st.sidebar.slider("Probability Range Factor", 0.1, 1.0, 0.25, step=0.05)
 st.sidebar.info("Note: Price simulation is capped at $200,000.")
 
-# Fetch data for July 1-7, 2025
 df = fetch_kraken_data(['BTC/USD', 'XBT/USD'], '1h', pd.to_datetime("2025-07-01"), pd.to_datetime("2025-07-07 23:59:59"), 168)
 
 # Data Preparation
@@ -85,7 +103,7 @@ if len(returns) > 5:
         sigma = np.pad(sigma, (1, 0), mode='edge')
     except Exception as e: st.warning(f"GARCH failed: {e}. Using constant volatility.")
 
-# Simulate price paths (GBM from working script)
+# Simulate price paths (GBM)
 def simulate_paths(p0, mu, sigma, T, N, n_paths, price_cap=200000.0):
     if N == 0: return np.array([[p0]]), np.array([0])
     dt = T / (N - 1) if N > 1 else T
@@ -100,7 +118,7 @@ def simulate_paths(p0, mu, sigma, T, N, n_paths, price_cap=200000.0):
 with st.spinner("Simulating price paths (Monte Carlo)..."):
     paths, t = simulate_paths(p0, mu, sigma, T, N, n_paths)
 
-# --- ROBUST FOKKER-PLANCK SOLUTION VIA KDE ---
+# ROBUST FOKKER-PLANCK SOLUTION VIA KDE
 with st.spinner("Constructing Fokker-Planck solution via KDE..."):
     final_prices = paths[:, -1]
     kde = gaussian_kde(final_prices)
@@ -125,12 +143,11 @@ if len(support_levels) == 0 or len(resistance_levels) == 0:
     resistance_levels = levels[levels > median_level]
 
 # Compute hit probabilities
-support_probs, resistance_probs = [], []
 metric = VolatilityMetric(sigma, t, T)
+support_probs, resistance_probs = [], []
 total_support_prob, total_resistance_prob = 0.0, 0.0
 final_std_dev = np.std(final_prices)
 epsilon = epsilon_factor * final_std_dev
-
 for sr in support_levels:
     mask = (price_grid >= sr - epsilon) & (price_grid <= sr + epsilon)
     prob = np.trapz(u[mask], price_grid[mask]) * np.sqrt(np.abs(np.linalg.det(metric.metric_matrix([T, sr]))))
@@ -141,16 +158,29 @@ for rr in resistance_levels:
     prob = np.trapz(u[mask], price_grid[mask]) * np.sqrt(np.abs(np.linalg.det(metric.metric_matrix([T, rr]))))
     resistance_probs.append(prob)
     total_resistance_prob += prob
-
 if total_support_prob > 0: support_probs = [p / total_support_prob for p in support_probs]
 if total_resistance_prob > 0: resistance_probs = [p / total_resistance_prob for p in resistance_probs]
 
-# Geodesic
+# --- FIX: ROBUST GEODESIC CALCULATION VIA SOLVE_IVP ---
+# This bypasses the fragile metric.geodesic() function entirely.
+def geodesic_equation(s, y, metric_obj):
+    pos, vel = y[:2], y[2:]
+    gamma = metric_obj.christoffel_symbols(pos)
+    accel = -np.einsum('ijk,j,k->i', gamma, vel, vel)
+    return np.concatenate([vel, accel])
+
 try:
     delta_p = prices[-1] - p0 if N > 0 else 0
-    geodesic_func = metric.geodesic(initial_point=np.array([0.0, p0]), initial_tangent_vec=np.array([T, delta_p]))
-    geodesic_points = geodesic_func(np.linspace(0, 1, N))
-    geodesic_df = pd.DataFrame({"Time": geodesic_points[:, 0], "Price": geodesic_points[:, 1], "Path": "Geodesic"})
+    initial_point = np.array([0.0, p0])
+    # Set a non-zero velocity in the time direction to ensure movement
+    initial_velocity = np.array([1.0, delta_p / T if T > 0 else 0.0])
+    y0 = np.concatenate([initial_point, initial_velocity])
+    
+    sol = solve_ivp(
+        geodesic_equation, [0, T], y0, args=(metric,), 
+        t_eval=t, rtol=1e-5, atol=1e-7
+    )
+    geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
 except Exception as e:
     st.error(f"Geodesic computation failed: {e}. Using linear approximation.")
     geodesic_df = pd.DataFrame({"Time": t, "Price": p0 + (delta_p / T if T > 0 else 0) * t, "Path": "Geodesic"})
