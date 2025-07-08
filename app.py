@@ -7,7 +7,7 @@ from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 from geomstats.geometry.euclidean import Euclidean
-from geomstats.numerics.ivp import ScipySolveIVP  # Correct solver
+from geomstats.numerics.ivp import ScipySolveIVP
 from geomstats.learning.kmeans import RiemannianKMeans
 import warnings
 import time
@@ -22,7 +22,7 @@ class VolatilityMetric(RiemannianMetric):
         self.sigma = sigma
         self.t = t
         self.T = T
-        self.exp_solver = ScipySolveIVP()  # Correct solver
+        self.exp_solver = ScipySolveIVP()
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
@@ -141,10 +141,9 @@ density = hist / hist.max()
 
 # K-Means clustering for support/resistance
 try:
-    manifold = Euclidean(dim=2)
     metric = VolatilityMetric(sigma, t, T)
     data = np.vstack([t, paths[0]]).T  # Use first path for clustering
-    kmeans = RiemannianKMeans(manifold=manifold, n_clusters=n_clusters, tol=1e-3)
+    kmeans = RiemannianKMeans(metric=metric, n_clusters=n_clusters, tol=1e-3)
     kmeans.fit(data)
     labels = kmeans.labels_
     cluster_centers = kmeans.cluster_centers_
