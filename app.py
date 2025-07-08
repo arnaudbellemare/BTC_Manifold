@@ -10,9 +10,8 @@ from geomstats.numerics.geodesic import ExpODESolver
 from geomstats.numerics.ivp import ScipySolveIVP
 from scipy.integrate import solve_ivp
 from scipy.signal import find_peaks
-from dolfinx import fem, mesh, function, io
-import ufl
-from mpi4py import MPI
+from scipy.sparse import diags
+from scipy.sparse.linalg import spsolve
 import time
 import warnings
 warnings.filterwarnings("ignore")
@@ -55,7 +54,6 @@ class AdvancedRiemannianMetric(RiemannianMetric):
         return gamma
 
     def ricci_curvature(self, base_point):
-        # Approximate Ricci curvature (simplified 2D case)
         gamma = self.christoffel_symbols(base_point)
         g = self.metric_matrix(base_point)
         g_inv = np.linalg.inv(g)
@@ -177,74 +175,50 @@ def simulate_paths(p0, mu, v0, kappa, theta, xi, rho, sigma, T, N, n_paths):
 with st.spinner("Simulating Heston paths..."):
     paths, t, variances = simulate_paths(p0, mu, v0, kappa, theta, xi, rho, sigma, T, N, n_paths)
 
-# 2D Fokker-Planck on manifold with FEniCS
-msh = mesh.create_rectangle(MPI.COMM_WORLD, [np.array([0.0, min(prices) * 0.95]), np.array([T, max(prices) * 1.05])],
-                           [200, 400], cell_type=mesh.CellType.triangle)
-V = fem.FunctionSpace(msh, ("CG", 3))  # Cubic elements for higher accuracy
-u = function.Function(V)
-
-# Variational form with Laplace-Beltrami
-t_var = ufl.TrialFunction(V)
-v_test = ufl.TestFunction(V)
-x = ufl.SpatialCoordinate(msh)
-t, p = x[0], x[1]
-
-metric = AdvancedRiemannianMetric(sigma, t, T, prices)
-g = ufl.as_matrix([[metric.metric_matrix([t, p])[0, 0], metric.metric_matrix([t, p])[0, 1]],
-                   [metric.metric_matrix([t, p])[1, 0], metric.metric_matrix([t, p])[1, 1]]])
-g_inv = ufl.inv(g)
-det_g = ufl.det(g)
-
-def laplace_beltrami(u, g_inv, det_g):
-    return ufl.div(ufl.dot(g_inv, ufl.grad(u)) * ufl.sqrt(det_g)) / ufl.sqrt(det_g)
-
-F = (u * v_test * dx + 0.5 * dt * (laplace_beltrami(t_var, g_inv, det_g) * v * p**2 * u +
-                                   laplace_beltrami(t_var, g_inv, det_g) * xi**2 * v * u -
-                                   ufl.dot(ufl.grad(t_var), mu * p * ufl.grad(v_test)) -
-                                   ufl.dot(ufl.grad(t_var), kappa * (theta - v) * ufl.grad(v_test)[1])) * dx)
+# 2D Fokker-Planck with finite differences
+nt, np = 200, 400
+t_grid = np.linspace(0, T, nt)
+p_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, np)
+dt_fd = T / (nt - 1)
+dp = (max(prices) * 1.05 - min(prices) * 0.95) / (np - 1)
 
 # Initial condition
-def initial_condition(x):
-    values = np.zeros(x.shape[1])
-    sigma_init = np.sqrt(v0) * p0
-    values[:] = np.exp(-((x[1] - p0)**2) / (2 * sigma_init**2)) * np.exp(-((x[0] - 0)**2) / (2 * T**2))
-    return values
-u.interpolate(initial_condition)
+u = np.zeros((nt, np))
+sigma_init = np.sqrt(v0) * p0
+u[0, :] = np.exp(-((p_grid - p0)**2) / (2 * sigma_init**2))
+u[0, :] /= np.trapz(u[0, :], p_grid)
 
-# Time-stepping with adaptive solver
-dt_fem = T / 4000
-t_fem = 0.0
-for i in range(4000):
-    t_fem += dt_fem
-    problem = fem.LinearProblem(F, u, bcs=[])
-    u = problem.solve()
-    # Update variance (approximate)
-    v_vec = np.clip(variances.mean(axis=0) + kappa * (theta - variances.mean(axis=0)) * dt_fem, 1e-6, np.inf)
-    v = function.Function(V)
-    v.interpolate(lambda x: np.interp(x[0], t, v_vec))
+# Finite difference scheme
+r = dt_fd / dp**2
+A = diags([1, -2, 1], [-1, 0, 1], shape=(np, np)).toarray()
+A[0, 0] = A[-1, -1] = 1  # Neumann boundary
+A = r * A
 
-# Extract 1D density
-u_vec = u.vector.get_local()
-coords = msh.geometry.x
-price_coords = np.unique(coords[:, 1])
-u_density = np.zeros(len(price_coords))
-for i, p in enumerate(price_coords):
-    u_density[i] = np.mean(u_vec[np.where(np.isclose(coords[:, 1], p))[0]])
+for i in range(nt - 1):
+    idx = int(i * (len(sigma) - 1) / (nt - 1))
+    sigma_t = max(sigma[idx], 0.01)
+    var_t = np.interp(t_grid[i], t, variances.mean(axis=0))
+    b = u[i, :] + dt_fd * (0.5 * var_t * p_grid**2 * np.dot(A, u[i, :]) - mu * p_grid * np.gradient(u[i, :], dp))
+    u[i + 1, :] = spsolve(diags([1], [0], shape=(np, np)).toarray() - r * var_t * p_grid**2, b)
+    u[i + 1, :] = np.clip(u[i + 1, :], 1e-10, 1e10)
+    u[i + 1, :] /= np.trapz(u[i + 1, :], p_grid)
+
+u_density = u[-1, :]
 
 # Identify support and resistance with curvature
-du = np.gradient(u_density, price_coords[1] - price_coords[0])
-d2u = np.gradient(du, price_coords[1] - price_coords[0])
-ricci = metric.ricci_curvature(np.array([T, price_coords]))
-support_idx = np.where((du > 0) & (d2u < 0) & (u_density > 0.1 * u_density.max()) & (ricci[1, 1] < 0))[0]
-resistance_idx = np.where((du < 0) & (d2u > 0) & (u_density > 0.1 * u_density.max()) & (ricci[1, 1] > 0))[0]
-support_levels = price_coords[support_idx]
-resistance_levels = price_coords[resistance_idx]
+du = np.gradient(u_density, dp)
+d2u = np.gradient(du, dp)
+ricci = np.array([metric.ricci_curvature(np.array([T, p]))[1, 1] for p in p_grid])
+support_idx = np.where((du > 0) & (d2u < 0) & (u_density > 0.1 * u_density.max()) & (ricci < 0))[0]
+resistance_idx = np.where((du < 0) & (d2u > 0) & (u_density > 0.1 * u_density.max()) & (ricci > 0))[0]
+support_levels = p_grid[support_idx]
+resistance_levels = p_grid[resistance_idx]
 if len(support_levels) == 0 or len(resistance_levels) == 0:
     st.warning("Insufficient distinct levels. Using density peaks with curvature fallback.")
     peaks, _ = find_peaks(u_density, height=0.1 * u_density.max(), distance=10)
-    levels = price_coords[peaks]
-    support_levels = levels[(du[peaks] > 0) & (ricci[1, 1][peaks] < 0)]
-    resistance_levels = levels[(du[peaks] < 0) & (ricci[1, 1][peaks] > 0)]
+    levels = p_grid[peaks]
+    support_levels = levels[(du[peaks] > 0) & (ricci[peaks] < 0)]
+    resistance_levels = levels[(du[peaks] < 0) & (ricci[peaks] > 0)]
 
 # Heat kernel and probabilities
 def heat_kernel(t, x, y, metric):
@@ -258,23 +232,23 @@ total_resistance_prob = 0.0
 
 for sr in support_levels:
     prob = 0.0
-    for p in price_coords:
+    for p in p_grid:
         if abs(p - sr) <= epsilon:
             kernel = heat_kernel(T, [0, p0], [T, p], metric)
             det_g = np.linalg.det(metric.metric_matrix([T, p]))
             if det_g > 0:
-                prob += kernel * np.sqrt(det_g) * (price_coords[1] - price_coords[0])
+                prob += kernel * np.sqrt(det_g) * dp
     support_probs.append(prob)
     total_support_prob += prob
 
 for rr in resistance_levels:
     prob = 0.0
-    for p in price_coords:
+    for p in p_grid:
         if abs(p - rr) <= epsilon:
             kernel = heat_kernel(T, [0, p0], [T, p], metric)
             det_g = np.linalg.det(metric.metric_matrix([T, p]))
             if det_g > 0:
-                prob += kernel * np.sqrt(det_g) * (price_coords[1] - price_coords[0])
+                prob += kernel * np.sqrt(det_g) * dp
     resistance_probs.append(prob)
     total_resistance_prob += prob
 
@@ -295,7 +269,7 @@ try:
     delta_p = prices[-1] - prices[0]
     initial_tangent = np.array([T / N, delta_p / N, 0.0, 0.0])  # Normalized initial velocity
     sol = solve_ivp(geodesic_equation, [0, 1], np.concatenate([initial_point, initial_tangent[2:]]),
-                    args=(metric,), method='RK45', t_eval=np.linspace(0, 1, N), rtol=1e-6, atol=1e-8)
+                    args=(metric,), method='RK45', t_eval=np.linspace(0, 1, N), rtol=1e-8, atol=1e-10)
     geodesic_points = np.vstack([t * sol.y[0, :], initial_point[1] + sol.y[1, :] * T]).T
     geodesic_df = pd.DataFrame({
         "Time": geodesic_points[:, 0],
@@ -374,25 +348,33 @@ st.write("**Resistance Hit Probabilities:**", dict(zip(resistance_levels, resist
 st.write(f"**Trending Paths:** {trending_paths} (Distance < {trending_threshold:.2f})")
 st.write(f"**Reversion Paths:** {reversion_paths} (Distance > {reversion_threshold:.2f})")
 
-# MATLAB validation script (to be run separately)
+# MATLAB validation script
 matlab_script = """
 syms t p
-sigma = @(t) interp1(t_data, sigma_data, t); % Replace with Python data
-fisher = @(p) 1 ./ (hist(p_data, 50) + 1e-6); % Replace with Python data
+sigma = @(t) interp1(t_data, sigma_data, t); % Replace with Python t, sigma
+fisher = @(p) 1 ./ (hist(p_data, 50) + 1e-6); % Replace with Python prices
 g11 = 1;
 g22 = sigma(t)^2 + fisher(p);
 g = [g11 0; 0 g22];
 g_inv = inv(g);
+% Christoffel symbols
 christoffel = sym(zeros(2,2,2));
-christoffel(2,2,1) = diff(sigma(t), t) * p / (2 * sigma(t));
-% Compute geodesic equation and curvature (requires Symbolic Math Toolbox)
+d_sigma = diff(sigma(t), t);
+christoffel(2,2,1) = 0.5 * g_inv(1,1) * d_sigma * p / sigma(t);
+% Geodesic equation
 gamma_dot = [diff(p,t) diff(t,t)];
 geodesic_eq = christoffel .* gamma_dot * gamma_dot';
+% Ricci curvature (approximate)
 ricci = simplify(diff(g_inv, t) - christoffel * christoffel');
-disp('Metric:'); disp(g);
+disp('Metric Matrix:'); disp(g);
 disp('Christoffel Symbols:'); disp(christoffel);
 disp('Ricci Curvature:'); disp(ricci);
-% Plot geodesic (numerical solution needed with data)
+% Numerical geodesic (use ode45 with data)
+tspan = [0 1];
+y0 = [0; p0; 1; 0]; % [t, p, dt, dp]
+[t_sol, y_sol] = ode45(@(t,y) geodesic_eq, tspan, y0);
+plot(t_sol, y_sol(:,2)); % Plot price vs time
+xlabel('Time'); ylabel('Price');
 """
 st.write("**MATLAB Validation Script:**")
 st.code(matlab_script, language="matlab")
