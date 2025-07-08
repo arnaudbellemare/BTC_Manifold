@@ -7,7 +7,6 @@ from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 from geomstats.geometry.euclidean import Euclidean
-from geomstats.numerics.geodesic import ScipySolveIVP  # Correct solver
 import warnings
 import time
 warnings.filterwarnings("ignore")
@@ -17,11 +16,10 @@ st.title("BTC/USD Price Analysis on Riemannian Manifold")
 # Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        super().__init__(space=Euclidean(dim=2))
+        super().__init__(space=Euclidean(dim=2))  # Define 2D Euclidean manifold
         self.sigma = sigma
         self.t = t
         self.T = T
-        self.exp_solver = ScipySolveIVP()  # Set correct solver
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
