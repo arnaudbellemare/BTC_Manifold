@@ -68,26 +68,30 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'timestamp': sim_t.astype(np.int64) // 10**6})
 
 # --- CORRECTED: Function to visualize the manifold's geometry ---
-def visualize_manifold(metric, t_grid, p_domain):
+def visualize_manifold(metric, t_grid, p_grid):
     st.subheader("Visualizing the Market Manifold")
     st.write("This heatmap shows the 'cost' of price movement (technically, the `g_pp` component of the metric tensor) over time. Yellow areas represent high volatility, where the manifold is 'stretched' and price movement is difficult. Dark areas are low-volatility regions where price movement is easier.")
     
-    # 1. Calculate the cost at each time step
-    costs = [metric.metric_matrix([t_val, 0])[1, 1] for t_val in t_grid]
-    min_cost, max_cost = min(costs), max(costs)
-
-    # 2. Create a DataFrame for the heatmap background
-    heatmap_df = pd.DataFrame({'Time': t_grid, 'Cost': costs})
+    # 1. Create a proper 2D grid for the heatmap data
+    g_pp_values = []
+    for t_val in t_grid:
+        # Cost is the same for all prices at a given time t
+        cost = metric.metric_matrix([t_val, 0])[1, 1]
+        for p_val in p_grid:
+            g_pp_values.append({'Time': t_val, 'Price': p_val, 'Cost': cost})
     
-    heatmap = alt.Chart(heatmap_df).mark_rect().encode(
-        x=alt.X('Time:Q', title="Time"),
+    g_df = pd.DataFrame(g_pp_values)
+    min_cost, max_cost = g_df['Cost'].min(), g_df['Cost'].max()
+
+    # 2. Create the heatmap with correct x, y, and color encodings
+    heatmap = alt.Chart(g_df).mark_rect().encode(
+        x='Time:Q',
+        y=alt.Y('Price:Q', scale=alt.Scale(zero=False)),
         color=alt.Color('Cost:Q', 
                         scale=alt.Scale(scheme='viridis', domain=[min_cost, max_cost]), 
                         legend=alt.Legend(title="Price Movement 'Cost'"))
     ).properties(
         title="Market Manifold Geometry (g_pp = σ(t)²)",
-        width=400,
-        height=300
     )
     
     return heatmap
@@ -206,12 +210,14 @@ with col1:
     st.altair_chart(main_chart, use_container_width=True)
 
 with col2:
-    # --- DISPLAY THE CORRECTED MANIFOLD VISUALIZATION ---
-    # The price domain for the viz is now taken from the historical data
-    p_domain = [prices.min(), prices.max()]
-    manifold_heatmap = visualize_manifold(metric, t, p_domain)
+    # DISPLAY THE CORRECTED MANIFOLD VISUALIZATION
+    # A coarser grid for the price axis is fine for visualization
+    viz_p_grid = np.linspace(prices.min(), prices.max(), 50)
+    manifold_heatmap = visualize_manifold(metric, t, viz_p_grid)
+    
+    # Overlay the actual historical price path on the heatmap
     history_df = pd.DataFrame({'Time': times, 'Price': prices})
-    history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2.5, opacity=0.8).encode(x='Time:Q', y='Price:Q')
+    history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2.5, opacity=0.7).encode(x='Time:Q', y='Price:Q')
     
     st.altair_chart((manifold_heatmap + history_line).properties(height=300).interactive(), use_container_width=True)
     
