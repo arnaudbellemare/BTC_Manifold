@@ -67,34 +67,36 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
     sim_prices = 70000 + np.cumsum(np.random.normal(0, 500, 168))
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'timestamp': sim_t.astype(np.int64) // 10**6})
 
-# --- DEFINITIVE FIX: Function to visualize the manifold using rank-based coloring ---
-def visualize_manifold(sigma_data, t_grid):
+# --- DEFINITIVE FIX: Function to visualize the manifold using a gradient background ---
+def visualize_manifold(sigma_data, t_grid, p_domain, history_df):
     st.subheader("Visualizing the Market Manifold")
-    st.write("This heatmap shows the relative volatility over time. Yellow areas are periods of the highest volatility in the dataset, where price movement is 'difficult'. Dark areas are the lowest volatility periods.")
+    st.write("This chart shows the relative volatility over time. Yellow areas are periods of the highest volatility in the dataset, where price movement is 'difficult'. Dark areas are the lowest volatility periods.")
     
-    # 1. Use the GARCH sigma values directly, as they represent the volatility over time.
-    costs = sigma_data[:len(t_grid)]
+    # 1. Create a DataFrame with volatility ranks for the gradient.
+    ranks = rankdata(sigma_data[:len(t_grid)], "average") / len(sigma_data[:len(t_grid)])
+    viz_df = pd.DataFrame({'Time': t_grid, 'Rank': ranks})
     
-    # 2. Convert costs to rank percentiles to guarantee a full color spectrum.
-    ranks = rankdata(costs, "average") / len(costs) # Result is from 0.0 to 1.0
-    
-    # 3. Create a DataFrame for Altair.
-    heatmap_df = pd.DataFrame({
-        'Time': t_grid, 
-        'Volatility': costs, # For tooltip
-        'Rank': ranks # For color
-    })
-    
-    heatmap = alt.Chart(heatmap_df).mark_rect().encode(
-        x=alt.X('Time:Q', title="Time (hours)"),
-        color=alt.Color('Rank:Q', 
-                        scale=alt.Scale(scheme='viridis'), 
+    # 2. Create the gradient background using mark_area.
+    gradient = alt.Chart(viz_df).mark_area().encode(
+        x='Time:Q',
+        color=alt.Color('Rank:Q',
+                        scale=alt.Scale(scheme='viridis'),
                         legend=alt.Legend(title="Volatility Percentile"))
-    ).properties(
-        title="Market Manifold Geometry (Colored by Volatility Rank)",
     )
     
-    return heatmap
+    # 3. Create the historical price line chart.
+    line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2.5).encode(
+        x=alt.X('Time:Q', title="Time (hours)"),
+        y=alt.Y('Price:Q', title="Price", scale=alt.Scale(domain=p_domain, zero=False))
+    )
+
+    # 4. Layer the charts together. The gradient will fill the background.
+    final_chart = (gradient + line).properties(
+        title="Market Manifold Geometry (Colored by Volatility Rank)",
+        height=300
+    ).interactive()
+
+    return final_chart
 
 # Parameters
 st.sidebar.header("Parameters")
@@ -211,19 +213,10 @@ with col1:
 
 with col2:
     # DISPLAY THE CORRECTED MANIFOLD VISUALIZATION
-    manifold_heatmap = visualize_manifold(sigma, t)
+    p_domain = [prices.min(), prices.max()] if N > 0 else [60000, 80000]
     history_df = pd.DataFrame({'Time': times, 'Price': prices})
-    history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2.5, opacity=0.7).encode(x='Time:Q', y='Price:Q')
-    
-    # Layer the heatmap and the line chart, setting the y-axis scale for the line
-    final_viz = alt.layer(
-        manifold_heatmap, 
-        history_line
-    ).resolve_scale(
-        y = 'independent'
-    ).properties(height=300).interactive()
-
-    st.altair_chart(final_viz, use_container_width=True)
+    manifold_chart = visualize_manifold(sigma, t, p_domain, history_df)
+    st.altair_chart(manifold_chart, use_container_width=True)
     
     st.write(f"**Expected Final Price:** ${np.mean(final_prices):,.2f}")
     st.write("**Support Levels (BTC/USD):**")
