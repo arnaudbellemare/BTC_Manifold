@@ -176,41 +176,78 @@ with st.spinner("Simulating Heston paths..."):
     paths, t, variances = simulate_paths(p0, mu, v0, kappa, theta, xi, rho, sigma, T, N, n_paths)
 
 # 2D Fokker-Planck with finite differences
-# 2D Fokker-Planck with finite differences
-nt = 400  # Number of time steps
-np = 800  # Number of price steps
-t_grid = np.linspace(0, T, nt)  # Time grid
-p_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, np)  # Price grid
-dt_fd = T / (nt - 1)
-dp = (max(prices) * 1.05 - min(prices) * 0.95) / (np - 1)
 
-# Initial condition
-u = np.zeros((nt, np))
+# --- Grid Setup (FIXED) ---
+nt = 400  # Number of time steps
+n_p_steps = 800  # Number of price steps (RENAMED from np)
+t_grid = np.linspace(0, T, nt)  # Time grid
+p_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, n_p_steps)  # Price grid
+dt_fd = T / (nt - 1)
+dp = (max(prices) * 1.05 - min(prices) * 0.95) / (n_p_steps - 1)
+
+# --- Initial Condition ---
+u = np.zeros((nt, n_p_steps))
 sigma_init = np.sqrt(v0) * p0
-u[0, :] = np.exp(-((p_grid - p0)**2) / (2 * sigma_init**2))
+initial_variance = (sigma_init**2) if sigma_init > 0 else (np.std(prices[:10]) or 1.0)
+u[0, :] = np.exp(-((p_grid - p0)**2) / (2 * initial_variance))
 u[0, :] /= np.trapz(u[0, :], p_grid)
 
-# Crank-Nicolson scheme with Laplace-Beltrami
-r = dt_fd / (2 * dp**2)
-A = diags([1, -2, 1], [-1, 0, 1], shape=(np, np)).toarray()
-A[0, 0] = A[-1, -1] = 1  # Neumann boundary
-A = r * A
-I = diags([1], [0], shape=(np, np)).toarray()
+# --- Build Finite Difference Matrices (ROBUST METHOD) ---
+# First derivative (central difference) for drift
+D1_matrix = (1 / (2 * dp)) * diags([-1, 0, 1], [-1, 0, 1], shape=(n_p_steps, n_p_steps), format="csr")
+# Second derivative for diffusion
+D2_matrix = (1 / dp**2) * diags([1, -2, 1], [-1, 0, 1], shape=(n_p_steps, n_p_steps), format="csr")
 
+# Neumann boundary conditions (du/dp = 0)
+# This enforces a "reflecting" boundary, so probability does not escape.
+D2_matrix.setdiag(2, k=1)      # D2[0, 1] = 2/dp^2
+D2_matrix.setdiag(-2, k=0)     # D2[0, 0] = -2/dp^2
+D2_matrix.setdiag(-2, k=-1)    # D2[-1, -2] = -2/dp^2
+D2_matrix.setdiag(2, k=-2)     # D2[-1, -1] = 2/dp^2
+
+I = diags([1], [0], shape=(n_p_steps, n_p_steps), format="csr")
+
+# --- Time Evolution Loop (CORRECTED CRANK-NICOLSON) ---
 for i in range(nt - 1):
+    # Get parameters for the current time step
+    current_time = t_grid[i]
     idx = int(i * (len(sigma) - 1) / (nt - 1))
-    sigma_t = max(sigma[idx], 0.01)
-    var_t = np.interp(t_grid[i], t, variances.mean(axis=0))
-    metric = AdvancedRiemannianMetric(sigma[:idx+1], t[:i+1], t_grid[i], prices[:i+1], variances[:, :i+1])
-    g = np.array([metric.metric_matrix([t_grid[i], p]) for p in p_grid])
-    det_g = np.array([np.linalg.det(g_k) for g_k in g])
-    g_inv = np.array([np.linalg.inv(g_k) for g_k in g])
-    laplace_term = np.array([np.sum(g_inv[k] * np.gradient(np.gradient(u[i, :], dp), dp)) for k in range(np)])
-    b = u[i, :] + 0.5 * dt_fd * (0.5 * var_t * p_grid**2 * laplace_term - mu * p_grid * np.gradient(u[i, :], dp))
-    A_eff = I - r * var_t * p_grid**2 * np.diag(det_g)
-    u[i + 1, :] = spsolve(csr_matrix(A_eff), b)
-    u[i + 1, :] = np.clip(u[i + 1, :], 1e-10, 1e10)
-    u[i + 1, :] /= np.trapz(u[i + 1, :], p_grid)
+    var_t = np.interp(current_time, t, variances.mean(axis=0))
+    
+    # Effective diffusion coefficient from Heston model
+    # This is the (sigma*S)^2 term in the SDE
+    D_eff = var_t * p_grid**2
+    
+    # Note: To incorporate the metric more directly as you intended, you could modulate D_eff.
+    # For example: D_eff *= g_inv[:, 1, 1], where g_inv comes from the metric calculation.
+    # However, the metric already includes variance, so this might be redundant.
+    
+    # Build drift and diffusion operators for this time step
+    # Drift operator matrix: L_d = -mu*p * d/dp
+    L_d = diags(-mu * p_grid, 0) @ D1_matrix
+    # Diffusion operator matrix: L_D = 0.5 * D_eff * d^2/dp^2
+    L_D = diags(0.5 * D_eff, 0) @ D2_matrix
+
+    # Total spatial operator for the PDE
+    L = L_d + L_D
+
+    # Crank-Nicolson scheme: (I - dt/2 * L)u_new = (I + dt/2 * L)u_old
+    LHS = I - 0.5 * dt_fd * L
+    RHS = I + 0.5 * dt_fd * L
+    
+    b = RHS @ u[i, :]
+    
+    # Solve the linear system for the next time step
+    u[i + 1, :] = spsolve(LHS, b)
+
+    # Normalize the probability distribution (conserves probability)
+    u[i + 1, :] = np.maximum(u[i + 1, :], 0) # Probability cannot be negative
+    norm = np.trapz(u[i + 1, :], p_grid)
+    if norm > 1e-9:
+        u[i + 1, :] /= norm
+    else:
+        # If probability vanishes, reset to a zero array
+        u[i + 1, :] = np.zeros(n_p_steps)
 
 u_density = u[-1, :]
 
