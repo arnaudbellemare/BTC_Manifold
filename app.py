@@ -154,17 +154,30 @@ def analyze_path_distribution(final_prices, asset_name):
     s_df = pd.DataFrame({'Level': support_levels})
     r_df = pd.DataFrame({'Level': resistance_levels})
 
-    base = alt.Chart(density_df).mark_area(opacity=0.3).encode(
-        x=alt.X('Price:Q', title=f'{asset_name} Price'),
-        y='Density:Q'
-    )
-    s_lines = alt.Chart(s_df).mark_rule(color='green', strokeWidth=2).encode(y='Level:Q')
-    r_lines = alt.Chart(r_df).mark_rule(color='red', strokeWidth=2).encode(y='Level:Q')
+    try:
+        import altair as alt
+        base = alt.Chart(density_df).mark_area(opacity=0.3).encode(
+            x=alt.X('Price:Q', title=f'{asset_name} Price'),
+            y='Density:Q'
+        )
+        s_lines = alt.Chart(s_df).mark_rule(color='green', strokeWidth=2).encode(y='Level:Q')
+        r_lines = alt.Chart(r_df).mark_rule(color='red', strokeWidth=2).encode(y='Level:Q')
 
-    chart = (base + s_lines + r_lines).properties(
-        title=f"Final Price Probability Density with Support (Green) and Resistance (Red)"
-    ).interactive()
-    st.altair_chart(chart, use_container_width=True)
+        chart = (base + s_lines + r_lines).properties(
+            title=f"Final Price Probability Density with Support (Green) and Resistance (Red)"
+        ).interactive()
+        st.altair_chart(chart, use_container_width=True)
+    except ImportError:
+        st.warning("Altair not installed. Skipping density plot.")
+        # Fallback to Plotly
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=price_grid, y=u, mode='lines', name='Density', fill='tozeroy', opacity=0.3))
+        for level in support_levels:
+            fig.add_hline(y=level, line=dict(color='green', dash='dash'), annotation_text=f'S: ${level:,.2f}')
+        for level in resistance_levels:
+            fig.add_hline(y=level, line=dict(color='red', dash='dash'), annotation_text=f'R: ${level:,.2f}')
+        fig.update_layout(title=f"{asset_name} Price Density with S/R Levels")
+        st.plotly_chart(fig, use_container_width=True)
 
     st.write("**Support Levels:**")
     st.dataframe(s_df.style.format({'Level': '${:,.2f}'}))
@@ -184,21 +197,32 @@ projection_hours = st.sidebar.slider("Projection Horizon (Hours)", 12, 168, 72)
 df = fetch_and_process_data(days=days_history)
 
 if df is not None:
+    # Debug: Check df structure
+    st.write("Debug: df columns:", list(df.columns))
+    st.write("Debug: Any NaNs in df[['BTC_close', 'ETH_close']]?", df[['BTC_close', 'ETH_close']].isna().any().to_dict())
+
     # Calculate returns and covariance
     returns = df[['BTC_close', 'ETH_close']].pct_change().dropna()
+    
+    # Debug: Check returns
+    st.write("Debug: returns columns:", list(returns.columns))
     
     # Compute rolling covariance
     cov_series = returns.rolling(window=rolling_window).cov().unstack(level=0)
     
-    # Debug: Print cov_series structure
-    st.write("Debug: cov_series columns:", cov_series.columns)
-    st.write("Debug: Sample cov_series row:", cov_series.iloc[0])
+    # Debug: Safely inspect cov_series structure
+    st.write("Debug: cov_series columns:", list(cov_series.columns))  # Convert to list to avoid pyarrow issue
+    if not cov_series.empty:
+        st.write("Debug: Sample cov_series row:", cov_series.iloc[0].to_dict())  # Convert row to dict
+    else:
+        st.error("cov_series is empty. Check data or rolling window size.")
+        st.stop()
     
     # Rename columns to ensure correct structure
     expected_columns = [('BTC_close', 'BTC_close'), ('BTC_close', 'ETH_close'), 
                         ('ETH_close', 'BTC_close'), ('ETH_close', 'ETH_close')]
     if not all(col in cov_series.columns for col in expected_columns):
-        st.error("Covariance matrix does not contain expected columns. Found columns: " + str(cov_series.columns))
+        st.error(f"Covariance matrix does not contain expected columns. Found: {list(cov_series.columns)}")
         st.stop()
     
     cov_series = cov_series[expected_columns]
