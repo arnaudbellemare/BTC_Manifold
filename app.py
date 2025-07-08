@@ -4,7 +4,9 @@ import numpy as np
 import pandas as pd
 from scipy.integrate import solve_ivp
 from scipy.linalg import inv, LinAlgError
+# Import the specific classes we need
 from geomstats.geometry.riemannian_metric import RiemannianMetric
+from geomstats.geometry.euclidean import Euclidean
 import plotly.graph_objects as go
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
@@ -14,8 +16,8 @@ import geomstats
 warnings.filterwarnings("ignore")
 st.set_page_config(layout="wide")
 
-# Debug: Check geomstats version
-st.write("Debug: geomstats version:", geomstats.__version__)
+# Debug: Check geomstats version (This is good to keep)
+st.write("geomstats version:", geomstats.__version__)
 
 # --- Page Title and Introduction ---
 st.title("Multi-Asset Market Analysis on a Fisher Information Manifold")
@@ -34,12 +36,21 @@ class FisherVolumeMetric(RiemannianMetric):
     is the time-varying, volume-weighted inverse covariance matrix.
     """
     def __init__(self, inv_cov_series, volume_factor_series):
-        # Minimal initialization for older geomstats versions
-        super().__init__()
+        # --- START OF THE FIX ---
+        # 1. Define the dimension of the manifold.
+        self.dim = 3
+        
+        # 2. Create an instance of the underlying space (a 3D Euclidean space).
+        #    This is the required 'space' argument for the parent class.
+        space = Euclidean(dim=self.dim)
+        
+        # 3. Call the parent class's __init__ with the mandatory 'space' argument.
+        super().__init__(space=space)
+        # --- END OF THE FIX ---
+        
         self.inv_cov_series = inv_cov_series
         self.volume_factor_series = volume_factor_series
         self.n_times = len(inv_cov_series)
-        self.dim = 3  # Define dimension manually for internal use
 
         # Validate inputs
         if self.inv_cov_series.empty or self.volume_factor_series.empty:
@@ -48,58 +59,90 @@ class FisherVolumeMetric(RiemannianMetric):
             raise ValueError("inv_cov_series and volume_factor_series have mismatched lengths")
 
     def set_time_params(self, t_max):
+        """Set the time scale for normalization."""
         self.t_max = t_max
 
     def get_metric_at_time_index(self, idx):
+        """Helper to get the metric tensor at a specific time index."""
+        # Clamp index to be within the bounds of the series
         idx = int(np.clip(idx, 0, self.n_times - 1))
-        g_fisher = self.inv_cov_series.iloc[idx].values.reshape(2, 2)  # Reshape to 2x2
+        
+        # Retrieve pre-computed inverse covariance and volume factor
+        g_fisher = self.inv_cov_series.iloc[idx].values.reshape(2, 2)
         vol_factor = self.volume_factor_series.iloc[idx]
-        g_price_space = g_fisher * vol_factor  # Now correctly 2x2
+        
+        # Scale the price-space part of the metric
+        g_price_space = g_fisher * vol_factor
+        
+        # Embed the 2x2 price metric into the full 3x3 (t, p1, p2) metric
         g = np.eye(3)
         g[1:, 1:] = g_price_space
-        # Debug: Verify shapes
-        st.write("Debug: g_fisher shape:", g_fisher.shape)
-        st.write("Debug: g_price_space shape:", g_price_space.shape)
-        st.write("Debug: g shape:", g.shape)
         return g
 
-    def metric_matrix(self, base_point):
+    def metric_matrix(self, base_point=None):
+        """
+        Computes the metric matrix at a given base point (t, p1, p2).
+        The metric only depends on the time coordinate 't'.
+        """
         t = base_point[0]
+        # Normalize time 't' to get an index into our data series
         time_index = t / self.t_max * (self.n_times - 1) if self.t_max > 0 else 0
         return self.get_metric_at_time_index(time_index)
 
-    def christoffel_symbols(self, base_point):
-        eps = 1e-4
+    def christoffel_symbols(self, base_point=None):
+        """
+        Computes the Christoffel symbols at a given base point.
+        Uses a numerical derivative for the time-dependent part of the metric.
+        """
+        eps = 1e-4  # Small step for numerical differentiation
         t = base_point[0]
         
+        # Normalize time 't' to get an index
         time_index = t / self.t_max * (self.n_times - 1) if self.t_max > 0 else 0
         
-        # dg/dt (numerical derivative)
-        g_plus = self.get_metric_at_time_index(time_index + eps / self.t_max * (self.n_times - 1) if self.t_max > 0 else 0)
-        g_minus = self.get_metric_at_time_index(time_index - eps / self.t_max * (self.n_times - 1) if self.t_max > 0 else 0)
+        # Numerical derivative of the metric tensor w.r.t. time (x^0)
+        # We need a small delta in terms of our time index
+        idx_delta = eps / self.t_max * (self.n_times - 1) if self.t_max > 0 else 0
+        g_plus = self.get_metric_at_time_index(time_index + idx_delta)
+        g_minus = self.get_metric_at_time_index(time_index - idx_delta)
         dg_dt = (g_plus - g_minus) / (2 * eps)
 
         try:
             g_inv = inv(self.metric_matrix(base_point))
         except LinAlgError:
-            g_inv = np.eye(3)  # Fallback to Euclidean if metric is singular
+            g_inv = np.eye(self.dim) # Fallback to Euclidean if metric is singular
 
-        # Γ^k_ij = 0.5 * g^kl * (∂g_li/∂x^j + ∂g_lj/∂x^i - ∂g_ij/∂x^l)
-        # Simplified because g only depends on x^0 = t
-        gamma = np.zeros((3, 3, 3))
-        for i in range(3):
-            for j in range(3):
-                term = np.zeros(3)
+        # Christoffel symbol formula: Γ^k_ij = 0.5 * g^kl * (∂g_li/∂x^j + ∂g_lj/∂x^i - ∂g_ij/∂x^l)
+        # This simplifies greatly because our metric g only depends on x^0 = t.
+        # So, derivatives w.r.t. x^1 (p1) and x^2 (p2) are zero.
+        gamma = np.zeros((self.dim, self.dim, self.dim))
+        
+        # The only non-zero derivatives are ∂g_ij / ∂t
+        for i in range(self.dim):
+            for j in range(self.dim):
+                # The term in parentheses simplifies to:
+                # δ_j0 * ∂g_li/∂t + δ_i0 * ∂g_lj/∂t - δ_l0 * ∂g_ij/∂t
+                # where δ is the Kronecker delta
+                term = np.zeros(self.dim)
                 dg_ij_dt = dg_dt[i, j]
-                if i == 0: term += dg_dt[:, j]
-                if j == 0: term += dg_dt[:, i]
+                if i == 0:  # If the i-th coordinate is time
+                    term += dg_dt[:, j]
+                if j == 0:  # If the j-th coordinate is time
+                    term += dg_dt[:, i]
+                
+                # This corresponds to the -∂g_ij/∂x^l term where l=0 (time)
                 term[0] -= dg_ij_dt
+                
+                # Final calculation for Γ^k_ij
                 gamma[:, i, j] = 0.5 * np.dot(g_inv, term)
+                
         return gamma
 
 def geodesic_equation(s, y, metric_obj):
+    """The geodesic ODE: d²x/ds² + Γ^i_jk * (dx/ds)^j * (dx/ds)^k = 0"""
     pos, vel = y[:3], y[3:]
     gamma = metric_obj.christoffel_symbols(pos)
+    # Einstein summation for the acceleration term
     accel = -np.einsum('ijk,j,k->i', gamma, vel, vel)
     return np.concatenate([vel, accel])
 
@@ -114,7 +157,8 @@ def fetch_and_process_data(symbols=['BTC/USD', 'ETH/USD'], timeframe='1h', days=
     for symbol in symbols:
         try:
             since = int(start_date.timestamp() * 1000)
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=days*24)
+            # Fetch one more day than needed to ensure enough data for rolling window
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=(days+5)*24)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('datetime', inplace=True)
@@ -135,38 +179,31 @@ def analyze_path_distribution(final_prices, asset_name):
     """
     Analyzes the distribution of final prices from a Monte Carlo simulation
     to find support and resistance levels.
-    Returns support and resistance levels for use in visualization.
     """
     st.subheader(f"Support & Resistance Analysis for {asset_name}")
 
-    # 1. Estimate probability density using Kernel Density Estimation (KDE)
+    if len(final_prices) < 2:
+        st.warning(f"Not enough data points to analyze S/R for {asset_name}.")
+        return [], []
+
     kde = gaussian_kde(final_prices)
     price_grid = np.linspace(final_prices.min(), final_prices.max(), 400)
-    u = kde(price_grid)
-    dp = price_grid[1] - price_grid[0]
-
-    # 2. Find S/R levels by analyzing derivatives of the density curve
-    du = np.gradient(u, dp)
-    d2u = np.gradient(du, dp)
-
-    # Inflection points where concavity changes are potential S/R levels
-    support_idx, _ = find_peaks(-d2u, height=np.std(d2u)*0.5, distance=5)
-    resistance_idx, _ = find_peaks(d2u, height=np.std(d2u)*0.5, distance=5)
-
-    support_levels = price_grid[support_idx]
-    resistance_levels = price_grid[resistance_idx]
+    density = kde(price_grid)
     
-    # Fallback if insufficient levels are found
-    if len(support_levels) < 1 or len(resistance_levels) < 1:
-        st.warning("Derivative method found few levels. Using density peaks as fallback.")
-        peaks, _ = find_peaks(u, height=0.1 * u.max(), distance=10)
+    # Find peaks in the density function as potential S/R levels
+    peaks, _ = find_peaks(density, height=0.1 * density.max(), distance=10)
+    
+    if len(peaks) < 2:
+        st.warning("Could not find distinct S/R levels from distribution. Using quantiles as fallback.")
+        support_levels = [np.quantile(final_prices, 0.25)]
+        resistance_levels = [np.quantile(final_prices, 0.75)]
+    else:
         levels = price_grid[peaks]
-        median_level = np.median(levels) if len(levels) > 0 else np.median(price_grid)
+        median_level = np.median(levels)
         support_levels = levels[levels <= median_level]
         resistance_levels = levels[levels > median_level]
 
-    # 3. Display Results
-    density_df = pd.DataFrame({'Price': price_grid, 'Density': u})
+    density_df = pd.DataFrame({'Price': price_grid, 'Density': density})
     s_df = pd.DataFrame({'Level': support_levels})
     r_df = pd.DataFrame({'Level': resistance_levels})
 
@@ -176,8 +213,8 @@ def analyze_path_distribution(final_prices, asset_name):
             x=alt.X('Price:Q', title=f'{asset_name} Price'),
             y='Density:Q'
         )
-        s_lines = alt.Chart(s_df).mark_rule(color='green', strokeWidth=2).encode(y='Level:Q')
-        r_lines = alt.Chart(r_df).mark_rule(color='red', strokeWidth=2).encode(y='Level:Q')
+        s_lines = alt.Chart(s_df).mark_rule(color='green', strokeWidth=2).encode(x='Level:Q')
+        r_lines = alt.Chart(r_df).mark_rule(color='red', strokeWidth=2).encode(x='Level:Q')
 
         chart = (base + s_lines + r_lines).properties(
             title=f"Final Price Probability Density with Support (Green) and Resistance (Red)"
@@ -185,15 +222,6 @@ def analyze_path_distribution(final_prices, asset_name):
         st.altair_chart(chart, use_container_width=True)
     except ImportError:
         st.warning("Altair not installed. Skipping density plot.")
-        # Fallback to Plotly
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=price_grid, y=u, mode='lines', name='Density', fill='tozeroy', opacity=0.3))
-        for level in support_levels:
-            fig.add_hline(y=level, line=dict(color='green', dash='dash'), annotation_text=f'S: ${level:,.2f}')
-        for level in resistance_levels:
-            fig.add_hline(y=level, line=dict(color='red', dash='dash'), annotation_text=f'R: ${level:,.2f}')
-        fig.update_layout(title=f"{asset_name} Price Density with S/R Levels")
-        st.plotly_chart(fig, use_container_width=True)
 
     st.write("**Support Levels:**")
     st.dataframe(s_df.style.format({'Level': '${:,.2f}'}))
@@ -209,132 +237,112 @@ rolling_window = st.sidebar.slider("Rolling Window for Covariance (Hours)", 12, 
 n_paths = st.sidebar.slider("Number of Simulated Paths", 500, 10000, 2000, step=100)
 projection_hours = st.sidebar.slider("Projection Horizon (Hours)", 12, 168, 72)
 
-# Load and process data
+data_load_state = st.text("Loading data...")
 df = fetch_and_process_data(days=days_history)
+data_load_state.text("Data loaded successfully!")
+
 
 if df is not None:
-    # Debug: Check df structure
-    st.write("Debug: df columns:", list(df.columns))
-    st.write("Debug: df shape:", df.shape)
-    st.write("Debug: Any NaNs in df[['BTC_close', 'ETH_close']]?", df[['BTC_close', 'ETH_close']].isna().any().to_dict())
-
+    # st.write("Debug: Raw data columns:", list(df.columns))
+    
     # Calculate returns
     returns = df[['BTC_close', 'ETH_close']].pct_change().dropna()
     
-    # Debug: Check returns
-    st.write("Debug: returns columns:", list(returns.columns))
-    st.write("Debug: returns shape:", returns.shape)
+    # Compute rolling covariance and inverse covariance
+    cov_matrices = returns.rolling(window=rolling_window).cov().unstack()
+    cov_matrices.dropna(inplace=True)
     
-    # Compute rolling covariance manually
-    cov_series = pd.DataFrame(index=returns.index, 
-                             columns=['BTC_BTC', 'BTC_ETH', 'ETH_BTC', 'ETH_ETH'])
-    
-    for i in range(rolling_window, len(returns)):
-        window = returns.iloc[i-rolling_window:i]
-        if len(window) == rolling_window and not window.isna().any().any():
-            cov_matrix = window.cov().values
-            if cov_matrix.shape == (2, 2):
-                cov_series.iloc[i] = [cov_matrix[0, 0], cov_matrix[0, 1], 
-                                     cov_matrix[1, 0], cov_matrix[1, 1]]
-    
-    cov_series = cov_series.dropna()
-    
-    # Debug: Inspect cov_series
-    st.write("Debug: cov_series columns:", list(cov_series.columns))
-    st.write("Debug: cov_series shape:", cov_series.shape)
-    if not cov_series.empty:
-        st.write("Debug: Sample cov_series row:", cov_series.iloc[0].to_dict())
-    else:
-        st.error("cov_series is empty. Check rolling window size or data availability.")
+    if cov_matrices.empty:
+        st.error("Could not compute covariance matrix. Try a smaller rolling window or more historical data.")
         st.stop()
-
-    # Verify columns
-    expected_columns = ['BTC_BTC', 'BTC_ETH', 'ETH_BTC', 'ETH_ETH']
-    if list(cov_series.columns) != expected_columns:
-        st.error(f"Covariance matrix columns incorrect. Found: {list(cov_series.columns)}")
-        st.stop()
-
-    # Calculate inverse covariance (Fisher Metric)
+        
     inv_cov_list = []
-    for idx, row in cov_series.iterrows():
+    for idx, row in cov_matrices.iterrows():
+        cov_matrix = np.array([[row[('BTC_close', 'BTC_close')], row[('BTC_close', 'ETH_close')]],
+                               [row[('ETH_close', 'BTC_close')], row[('ETH_close', 'ETH_close')]]])
         try:
-            cov_matrix = np.array([[row['BTC_BTC'], row['BTC_ETH']],
-                                   [row['ETH_BTC'], row['ETH_ETH']]])
             inv_cov = inv(cov_matrix)
-            inv_cov_list.append(pd.Series(inv_cov.flatten(), 
-                                        index=['inv_11', 'inv_12', 'inv_21', 'inv_22'], 
-                                        name=idx))
+            inv_cov_list.append(pd.Series(inv_cov.flatten(), name=idx))
         except LinAlgError:
-            # Fallback to identity matrix if singular
-            inv_cov_list.append(pd.Series(np.eye(2).flatten(), 
-                                        index=['inv_11', 'inv_12', 'inv_21', 'inv_22'], 
-                                        name=idx))
+            inv_cov_list.append(pd.Series(np.eye(2).flatten(), name=idx)) # Fallback
+            
     inv_cov_series = pd.DataFrame(inv_cov_list)
-
-    # Debug: Check inv_cov_series
-    st.write("Debug: inv_cov_series shape:", inv_cov_series.shape)
-    st.write("Debug: inv_cov_series columns:", list(inv_cov_series.columns))
-
+    inv_cov_series.columns = ['inv_11', 'inv_12', 'inv_21', 'inv_22']
+    
     # Calculate volume factor
-    total_volume = df['BTC_volume'] * df['BTC_close'] + df['ETH_volume'] * df['ETH_close']
-    volume_factor = 1 / (1 + total_volume / total_volume.mean())
+    total_volume_usd = df['BTC_volume'] * df['BTC_close'] + df['ETH_volume'] * df['ETH_close']
+    volume_factor = 1 / (1 + total_volume_usd / total_volume_usd.mean())
     volume_factor = volume_factor.rolling(window=rolling_window).mean().dropna()
 
-    # Debug: Check volume_factor
-    st.write("Debug: volume_factor shape:", volume_factor.shape)
-
-    # Align all data series
-    common_index = cov_series.index.intersection(inv_cov_series.index).intersection(volume_factor.index)
+    # Align all data series to a common time index
+    common_index = inv_cov_series.index.intersection(volume_factor.index)
     inv_cov_series = inv_cov_series.loc[common_index]
     volume_factor = volume_factor.loc[common_index]
     aligned_prices = df.loc[common_index, ['BTC_close', 'ETH_close']]
 
-    # Debug: Check aligned data
-    st.write("Debug: aligned_prices shape:", aligned_prices.shape)
-    st.write("Debug: common_index length:", len(common_index))
-
     if aligned_prices.empty or inv_cov_series.empty or volume_factor.empty:
-        st.error("Aligned data, inv_cov_series, or volume_factor is empty. Check data alignment or rolling window size.")
+        st.error("Data alignment resulted in empty series. Please check rolling window and data period.")
         st.stop()
-
-    # Initialize Metric and Geodesic
+        
+    # --- Geodesic Calculation ---
     try:
         metric = FisherVolumeMetric(inv_cov_series, volume_factor)
+        
+        T_total_hours = (aligned_prices.index[-1] - aligned_prices.index[0]).total_seconds() / 3600
+        metric.set_time_params(T_total_hours)
+        
+        initial_point = np.array([0.0, aligned_prices['BTC_close'].iloc[0], aligned_prices['ETH_close'].iloc[0]])
+        final_point = np.array([T_total_hours, aligned_prices['BTC_close'].iloc[-1], aligned_prices['ETH_close'].iloc[-1]])
+        
+        # Simple initial velocity guess
+        initial_velocity = (final_point - initial_point) / T_total_hours if T_total_hours > 0 else np.zeros(3)
+        y0 = np.concatenate([initial_point, initial_velocity])
+
+        with st.spinner("Calculating geodesic path on the manifold..."):
+            t_eval = np.linspace(0, T_total_hours, len(aligned_prices))
+            sol = solve_ivp(
+                fun=geodesic_equation, 
+                t_span=[0, T_total_hours], 
+                y0=y0, 
+                args=(metric,), 
+                t_eval=t_eval, 
+                method='RK45', # RK45 is a good general-purpose solver
+                rtol=1e-4, 
+                atol=1e-6
+            )
+            geodesic_df = pd.DataFrame(sol.y.T, columns=['time', 'BTC', 'ETH', 'v_t', 'v_btc', 'v_eth'])
+
     except Exception as e:
-        st.error(f"Failed to initialize FisherVolumeMetric: {str(e)}")
+        st.error(f"An error occurred during geodesic calculation: {e}")
+        st.exception(e) # Print full traceback for debugging
         st.stop()
 
-    T_total_hours = (aligned_prices.index[-1] - aligned_prices.index[0]).total_seconds() / 3600
-    metric.set_time_params(T_total_hours)
-    
-    initial_point = np.array([0.0, aligned_prices['BTC_close'].iloc[0], aligned_prices['ETH_close'].iloc[0]])
-    final_point = np.array([T_total_hours, aligned_prices['BTC_close'].iloc[-1], aligned_prices['ETH_close'].iloc[-1]])
-    initial_velocity = (final_point - initial_point) / T_total_hours if T_total_hours > 0 else np.zeros(3)
-    y0 = np.concatenate([initial_point, initial_velocity])
-
-    with st.spinner("Calculating geodesic path on the manifold..."):
-        t_eval = np.linspace(0, T_total_hours, len(aligned_prices))
-        sol = solve_ivp(geodesic_equation, [0, T_total_hours], y0, args=(metric,), t_eval=t_eval, rtol=1e-4, atol=1e-6, method='RK45')
-        geodesic_df = pd.DataFrame(sol.y.T, columns=['time', 'BTC', 'ETH', 'v_t', 'v_btc', 'v_eth'])
-
-    # Monte Carlo Simulation
+    # --- Monte Carlo Simulation ---
     with st.spinner("Running Multi-Asset Monte Carlo Simulation..."):
-        dt = projection_hours / len(aligned_prices)
-        mu = returns.mean().values
-        last_cov = returns.iloc[-rolling_window:].cov().values
+        # Use recent market conditions for projection
+        recent_returns = returns.iloc[-rolling_window:]
+        mu = recent_returns.mean().values
+        last_cov = recent_returns.cov().values
         L = np.linalg.cholesky(last_cov)  # Cholesky decomposition for correlated noise
 
         p0 = aligned_prices.iloc[-1].values
-        num_steps = int(projection_hours / (T_total_hours / len(aligned_prices)))
-        paths = np.zeros((n_paths, num_steps, 2))
+        # Timestep should correspond to the data frequency (e.g., 1 hour)
+        dt = 1 # Projecting in 1-hour steps
+        num_steps = projection_hours
+        
+        paths = np.zeros((n_paths, num_steps + 1, 2))
         paths[:, 0, :] = p0
 
-        for i in range(1, num_steps):
+        for i in range(1, num_steps + 1):
+            # Correlated random shocks
             Z = np.random.normal(size=(n_paths, 2))
             correlated_dW = Z @ L.T
-            paths[:, i, :] = paths[:, i-1, :] * (1 + mu * dt + np.sqrt(dt) * correlated_dW)
+            # Geometric Brownian Motion step
+            paths[:, i, :] = paths[:, i-1, :] * np.exp((mu - 0.5 * np.diag(last_cov)) * dt + np.sqrt(dt) * correlated_dW)
 
-    # 3D Visualization
+
+    # --- Visualization Section ---
+    st.header("3D Market Visualization")
     fig = go.Figure()
     # Historical Path
     fig.add_trace(go.Scatter3d(
@@ -344,12 +352,12 @@ if df is not None:
     # Geodesic Path
     fig.add_trace(go.Scatter3d(
         x=aligned_prices.index, y=geodesic_df['BTC'], z=geodesic_df['ETH'],
-        mode='lines', line=dict(color='orange', width=6), name='Geodesic (Optimal) Path'
+        mode='lines', line=dict(color='orange', width=6, dash='dash'), name='Geodesic (Optimal) Path'
     ))
     
     # Projected Paths
-    proj_times = pd.to_datetime(aligned_prices.index[-1]) + pd.Timedelta(hours=dt) * np.arange(num_steps)
-    for i in range(min(n_paths, 100)):  # Display a subset of paths
+    proj_times = pd.date_range(start=aligned_prices.index[-1], periods=num_steps + 1, freq='h')
+    for i in range(min(n_paths, 100)):  # Display a subset of paths for performance
         fig.add_trace(go.Scatter3d(
             x=proj_times, y=paths[i, :, 0], z=paths[i, :, 1],
             mode='lines', line=dict(color='rgba(128,128,128,0.3)'), showlegend=False
@@ -370,93 +378,30 @@ if df is not None:
         eth_support_levels, eth_resistance_levels = analyze_path_distribution(paths[:, -1, 1], 'ETH')
 
     # --- Price Graph with Support/Resistance Grid ---
-    st.header("Price with Support and Resistance Grid")
+    st.header("Price Charts with Support and Resistance Grid")
     col1, col2 = st.columns(2)
+    
+    full_history_btc = df.loc[aligned_prices.index[0]:, 'BTC_close']
+    full_history_eth = df.loc[aligned_prices.index[0]:, 'ETH_close']
 
-    # BTC Price with S/R Grid
     with col1:
-        st.subheader("BTC Price with Support/Resistance Grid")
         fig_btc = go.Figure()
-        
-        # Historical Price
-        fig_btc.add_trace(go.Scatter(
-            x=aligned_prices.index,
-            y=aligned_prices['BTC_close'],
-            mode='lines',
-            line=dict(color='blue', width=2),
-            name='BTC Price'
-        ))
-
-        # Support Levels (Green, Dashed, Transparent)
+        fig_btc.add_trace(go.Scatter(x=full_history_btc.index, y=full_history_btc.values, mode='lines', name='BTC Price', line=dict(color='blue')))
         for level in btc_support_levels:
-            fig_btc.add_hline(
-                y=level,
-                line=dict(color='rgba(0, 255, 0, 0.3)', dash='dash', width=1),
-                annotation_text=f'S: ${level:,.2f}',
-                annotation_position='top left',
-                annotation_font=dict(color='green')
-            )
-
-        # Resistance Levels (Red, Dashed, Transparent)
+            fig_btc.add_hline(y=level, line=dict(color='green', dash='dash'), annotation_text=f'S: ${level:,.0f}')
         for level in btc_resistance_levels:
-            fig_btc.add_hline(
-                y=level,
-                line=dict(color='rgba(255, 0, 0, 0.3)', dash='dash', width=1),
-                annotation_text=f'R: ${level:,.2f}',
-                annotation_position='bottom left',
-                annotation_font=dict(color='red')
-            )
-
-        fig_btc.update_layout(
-            title='BTC Price with Support (Green) and Resistance (Red) Levels',
-            xaxis_title='Time',
-            yaxis_title='Price (USD)',
-            showlegend=True,
-            margin=dict(l=20, r=20, t=50, b=20)
-        )
+            fig_btc.add_hline(y=level, line=dict(color='red', dash='dash'), annotation_text=f'R: ${level:,.0f}')
+        fig_btc.update_layout(title='BTC Price with S/R Levels', yaxis_title='Price (USD)')
         st.plotly_chart(fig_btc, use_container_width=True)
 
-    # ETH Price with S/R Grid
     with col2:
-        st.subheader("ETH Price with Support/Resistance Grid")
         fig_eth = go.Figure()
-        
-        # Historical Price
-        fig_eth.add_trace(go.Scatter(
-            x=aligned_prices.index,
-            y=aligned_prices['ETH_close'],
-            mode='lines',
-            line=dict(color='blue', width=2),
-            name='ETH Price'
-        ))
-
-        # Support Levels (Green, Dashed, Transparent)
+        fig_eth.add_trace(go.Scatter(x=full_history_eth.index, y=full_history_eth.values, mode='lines', name='ETH Price', line=dict(color='purple')))
         for level in eth_support_levels:
-            fig_eth.add_hline(
-                y=level,
-                line=dict(color='rgba(0, 255, 0, 0.3)', dash='dash', width=1),
-                annotation_text=f'S: ${level:,.2f}',
-                annotation_position='top left',
-                annotation_font=dict(color='green')
-            )
-
-        # Resistance Levels (Red, Dashed, Transparent)
+            fig_eth.add_hline(y=level, line=dict(color='green', dash='dash'), annotation_text=f'S: ${level:,.0f}')
         for level in eth_resistance_levels:
-            fig_eth.add_hline(
-                y=level,
-                line=dict(color='rgba(255, 0, 0, 0.3)', dash='dash', width=1),
-                annotation_text=f'R: ${level:,.2f}',
-                annotation_position='bottom left',
-                annotation_font=dict(color='red')
-            )
-
-        fig_eth.update_layout(
-            title='ETH Price with Support (Green) and Resistance (Red) Levels',
-            xaxis_title='Time',
-            yaxis_title='Price (USD)',
-            showlegend=True,
-            margin=dict(l=20, r=20, t=50, b=20)
-        )
+            fig_eth.add_hline(y=level, line=dict(color='red', dash='dash'), annotation_text=f'R: ${level:,.0f}')
+        fig_eth.update_layout(title='ETH Price with S/R Levels', yaxis_title='Price (USD)')
         st.plotly_chart(fig_eth, use_container_width=True)
 
 else:
