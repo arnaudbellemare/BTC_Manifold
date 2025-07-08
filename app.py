@@ -94,7 +94,7 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
                 else:
                     st.warning(f"Invalid data for {symbol}: len={len(df)}")
             except ccxt.NetworkError as e:
-                st.warning(f"Network error for {symbol} (attempt {attempt+1): {e}")
+                st.warning(f"Network error for {symbol} (attempt {attempt+1}): {e}")  # Fixed syntax
                 time.sleep(5)
             except Exception as e:
                 st.warning(f"Error for {symbol} (attempt {attempt+1}): {e}")
@@ -113,7 +113,7 @@ n_display_paths = st.sidebar.slider("Number of Paths to Display", 50, 200, 100, 
 epsilon = st.sidebar.slider("Probability Integration Range ($)", 1000, 10000, 5000, step=1000)
 
 # Fetch data
-symbols = ['XBT/USD', 'BTC/USD', 'BTCUSDT', 'XBTUSDT']
+symbols = ['BTC/USD']
 timeframe = '1h'
 limit = 168
 start_date = pd.to_datetime("2025-07-01")
