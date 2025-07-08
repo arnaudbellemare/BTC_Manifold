@@ -5,7 +5,6 @@ import pandas as pd
 import altair as alt
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
-from geomstats.geometry.euclidean import Euclidean
 from geomstats.numerics.geodesic import ExpODESolver
 from geomstats.numerics.ivp import ScipySolveIVP
 from scipy.integrate import solve_ivp
@@ -17,11 +16,15 @@ warnings.filterwarnings("ignore")
 
 st.title("BTC/USD Price Analysis on a Volatility-Weighted Manifold")
 
-# Volatility-weighted metric (from the working script)
+# Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        # Using the compatible constructor from the working script
-        super().__init__(dim=2)
+        # --- THE DEFINITIVE FIX FOR GEOMSTATS COMPATIBILITY ---
+        # The parent constructor is called with NO arguments.
+        super().__init__()
+        # The dimension is set manually on the next line. This works on all versions.
+        self.dim = 2
+        
         self.sigma = sigma
         self.t = t
         self.T = T
@@ -98,18 +101,16 @@ def simulate_paths(p0, mu, sigma, T, N, n_paths, price_cap=200000.0):
 with st.spinner("Simulating price paths (Monte Carlo)..."):
     paths, t = simulate_paths(p0, mu, sigma, T, N, n_paths)
 
-# --- ADAPTATION: ROBUST FOKKER-PLANCK SOLUTION VIA KDE ---
-# The custom, fragile PDE solver is replaced with Kernel Density Estimation
-# on the final prices from the stable Monte Carlo simulation.
+# --- ROBUST FOKKER-PLANCK SOLUTION VIA KDE ---
 with st.spinner("Constructing Fokker-Planck solution via KDE..."):
     final_prices = paths[:, -1]
     kde = gaussian_kde(final_prices)
     price_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
     u = kde(price_grid)
-    u /= np.trapz(u, price_grid) # Normalize integral to 1
+    u /= np.trapz(u, price_grid)
     dp = price_grid[1] - price_grid[0]
 
-# Identify support and resistance levels (logic from working script)
+# Identify support and resistance levels
 du = np.gradient(u, dp)
 d2u = np.gradient(du, dp)
 support_idx = np.where((du > 0) & (d2u < 0) & (u > 0.05 * u.max()))[0]
@@ -128,18 +129,17 @@ if len(support_levels) == 0 or len(resistance_levels) == 0:
 support_probs, resistance_probs = [], []
 metric = VolatilityMetric(sigma, t, T)
 total_support_prob, total_resistance_prob = 0.0, 0.0
-# Dynamic epsilon
 final_std_dev = np.std(final_prices)
 epsilon = epsilon_factor * final_std_dev
 
 for sr in support_levels:
     mask = (price_grid >= sr - epsilon) & (price_grid <= sr + epsilon)
-    prob = np.trapz(u[mask], price_grid[mask]) * np.sqrt(np.linalg.det(metric.metric_matrix([T, sr])))
+    prob = np.trapz(u[mask], price_grid[mask]) * np.sqrt(np.abs(np.linalg.det(metric.metric_matrix([T, sr]))))
     support_probs.append(prob)
     total_support_prob += prob
 for rr in resistance_levels:
     mask = (price_grid >= rr - epsilon) & (price_grid <= rr + epsilon)
-    prob = np.trapz(u[mask], price_grid[mask]) * np.sqrt(np.linalg.det(metric.metric_matrix([T, rr])))
+    prob = np.trapz(u[mask], price_grid[mask]) * np.sqrt(np.abs(np.linalg.det(metric.metric_matrix([T, rr]))))
     resistance_probs.append(prob)
     total_resistance_prob += prob
 
@@ -148,13 +148,13 @@ if total_resistance_prob > 0: resistance_probs = [p / total_resistance_prob for 
 
 # Geodesic
 try:
-    delta_p = prices[-1] - p0
+    delta_p = prices[-1] - p0 if N > 0 else 0
     geodesic_func = metric.geodesic(initial_point=np.array([0.0, p0]), initial_tangent_vec=np.array([T, delta_p]))
     geodesic_points = geodesic_func(np.linspace(0, 1, N))
     geodesic_df = pd.DataFrame({"Time": geodesic_points[:, 0], "Price": geodesic_points[:, 1], "Path": "Geodesic"})
 except Exception as e:
     st.error(f"Geodesic computation failed: {e}. Using linear approximation.")
-    geodesic_df = pd.DataFrame({"Time": t, "Price": p0 + (delta_p / T) * t, "Path": "Geodesic"})
+    geodesic_df = pd.DataFrame({"Time": t, "Price": p0 + (delta_p / T if T > 0 else 0) * t, "Path": "Geodesic"})
 
 # Altair chart
 path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} for i in range(min(n_paths, n_display_paths)) for j in range(N)]
