@@ -72,26 +72,29 @@ def visualize_manifold(sigma_data, t_grid, history_df):
     st.subheader("Visualizing the Market Manifold")
     st.write("This chart shows the relative volatility over time. Yellow areas are periods of the highest volatility, where price movement is 'difficult'. Dark areas are the lowest volatility periods.")
     
-    # 1. Create a DataFrame with volatility ranks.
-    ranks = rankdata(sigma_data[:len(t_grid)], "average") / len(sigma_data[:len(t_grid)])
+    # Rolling volatility
+    rolling_sigma = pd.Series(sigma_data).rolling(window=24, min_periods=1).std()
+    
+    # DataFrame with volatility ranks
+    ranks = rankdata(rolling_sigma[:len(t_grid)], "average") / len(rolling_sigma[:len(t_grid)])
     viz_df = pd.DataFrame({'Time': t_grid, 'Rank': ranks})
     
-    # 2. Create a thick line with a color gradient that will act as the background.
-    gradient_background = alt.Chart(viz_df).mark_line(strokeWidth=300, opacity=0.8).encode( # A very thick line
-        x=alt.X('Time:Q', title="Time (hours)"),
-        y=alt.Y('mean(Rank):Q', axis=None), # Position doesn't matter, we hide the y-axis
-        color=alt.Color('Rank:Q',
-                        scale=alt.Scale(scheme='viridis'),
-                        legend=alt.Legend(title="Volatility Percentile"))
-    )
+    # Time slider
+    time_brush = alt.selection_interval(bind='scales', encodings=['x'])
+    
+    # Gradient background
+    gradient_background = alt.Chart(viz_df).mark_line(strokeWidth=300, opacity=0.8).encode(
+        x=alt.X('Time:Q', title="Time (hours)", scale=alt.Scale(domain=alt.DateTimeRange('2025-07-01', '2025-07-07'))),
+        y=alt.Y('mean(Rank):Q', axis=None),
+        color=alt.Color('Rank:Q', scale=alt.Scale(scheme='viridis'), legend=alt.Legend(title="Volatility Percentile"))
+    ).add_selection(time_brush)
 
-    # 3. Create the historical price line chart.
+    # History line
     history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2).encode(
         x='Time:Q',
         y=alt.Y('Price:Q', title="Price", scale=alt.Scale(zero=False))
-    )
+    ).transform_filter(time_brush)
 
-    # 4. Layer the charts and resolve the scales so they can be independent.
     final_chart = alt.layer(gradient_background, history_line).resolve_scale(
         y='independent'
     ).properties(
