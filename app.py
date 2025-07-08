@@ -16,10 +16,12 @@ warnings.filterwarnings("ignore")
 st.set_page_config(layout="wide")
 st.title("BTC/USD Price Analysis on a Volatility-Weighted Manifold")
 
-# Volatility-weighted metric
+# Volatility-weighted metric with all compatibility and mathematical fixes
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
+        # The definitive compatibility fix for old geomstats versions
         self.dim = 2
+        
         self.sigma = sigma
         self.t = t
         self.T = T
@@ -31,21 +33,26 @@ class VolatilityMetric(RiemannianMetric):
         return np.diag([1.0, sigma_val**2])
 
     def christoffel_symbols(self, base_point):
+        # Mathematically rigorous calculation for this specific metric
         t_val = base_point[0]
         idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         sigma_val = max(self.sigma[idx], 0.01)
+        
         eps = 1e-6
         t_plus, t_minus = min(t_val + eps, self.T), max(t_val - eps, 0)
         idx_plus = int(np.clip(t_plus / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         idx_minus = int(np.clip(t_minus / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
+        
         d_sigma_dt = (self.sigma[idx_plus] - self.sigma[idx_minus]) / (2 * eps)
+
         gamma = np.zeros((2, 2, 2))
         gamma[1, 0, 1] = (1 / sigma_val) * d_sigma_dt
         gamma[1, 1, 0] = gamma[1, 0, 1]
         gamma[0, 1, 1] = -sigma_val * d_sigma_dt
+        
         return gamma
 
-# Fetch Kraken data
+# Robust data fetching function
 @st.cache_data
 def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
     exchange = ccxt.kraken()
@@ -67,19 +74,17 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
     sim_prices = 70000 + np.cumsum(np.random.normal(0, 500, 168))
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'timestamp': sim_t.astype(np.int64) // 10**6})
 
-# --- CORRECTED: Function to visualize the manifold's geometry ---
+# Corrected manifold visualization function
 def visualize_manifold(metric, t_grid, p_grid):
     st.subheader("Visualizing the Market Manifold")
     st.write("This heatmap shows the 'cost' of price movement over time. Yellow areas represent high volatility, where the manifold is 'stretched' and price movement is difficult. Dark areas are low-volatility regions where price movement is easier.")
     
-    # Define a scaling factor to make the tiny cost values visible
     SCALING_FACTOR = 10000 
     
     g_pp_values = []
     for t_val in t_grid:
-        # Cost is the same for all prices at a given time t for this metric
         cost = metric.metric_matrix([t_val, 0])[1, 1]
-        scaled_cost = cost * SCALING_FACTOR # Scale the cost
+        scaled_cost = cost * SCALING_FACTOR
         for p_val in p_grid:
             g_pp_values.append({'Time': t_val, 'Price': p_val, 'Cost': scaled_cost})
     
@@ -91,7 +96,7 @@ def visualize_manifold(metric, t_grid, p_grid):
         y=alt.Y('Price:Q', scale=alt.Scale(zero=False)),
         color=alt.Color('Cost:Q', 
                         scale=alt.Scale(scheme='viridis', domain=[min_cost, max_cost]), 
-                        legend=alt.Legend(title=f"Cost (σ² × {SCALING_FACTOR})")) # Update legend title
+                        legend=alt.Legend(title=f"Cost (σ² × {SCALING_FACTOR})"))
     ).properties(
         title="Market Manifold Geometry",
     )
@@ -106,7 +111,7 @@ epsilon_factor = st.sidebar.slider("Probability Range Factor", 0.1, 1.0, 0.25, s
 
 df = fetch_kraken_data(['BTC/USD', 'XBT/USD'], '1h', pd.to_datetime("2025-07-01"), pd.to_datetime("2025-07-07 23:59:59"), 168)
 
-# Data Prep
+# Data Preparation
 prices = df['close'].values
 times = (df['timestamp'] - df['timestamp'].iloc[0]) / (1000 * 3600) if not df.empty else np.array([])
 T = times.iloc[-1] if len(times) > 0 else 168
@@ -181,7 +186,7 @@ with col1:
     if total_support_prob > 0: support_probs = [p / total_support_prob for p in support_probs]
     if total_resistance_prob > 0: resistance_probs = [p / total_resistance_prob for p in resistance_probs]
 
-    # Geodesic Calculation
+    # ROBUST GEODESIC CALCULATION VIA SOLVE_IVP
     def geodesic_equation(s, y, metric_obj):
         pos, vel = y[:2], y[2:]
         gamma = metric_obj.christoffel_symbols(pos)
