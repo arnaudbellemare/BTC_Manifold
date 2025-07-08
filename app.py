@@ -3,12 +3,11 @@ import ccxt
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.signal import find_peaks
-from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 from geomstats.geometry.euclidean import Euclidean
 from geomstats.geometry.base import ExpSolver
 from geomstats.learning.kmeans import RiemannianKMeans
+from arch import arch_model
 import warnings
 import time
 warnings.filterwarnings("ignore")
@@ -69,9 +68,8 @@ def fetch_kraken_data(symbols, timeframe, limit):
 # Parameters
 st.sidebar.header("Parameters")
 n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 50, step=50)
-n_bins = st.sidebar.slider("Number of Bins for Density", 20, 100, 50, step=5)
-n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
 n_clusters = st.sidebar.slider("Number of K-Means Clusters", 2, 10, 2, step=1)
+n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
 
 symbols = ['BTC/USD', 'XXBTZUSD', 'XBT/USD', 'BTCUSDT', 'BTC-USD', 'XBTUSDT']
 timeframe = '1h'
@@ -130,19 +128,9 @@ def simulate_paths(p0, mu, sigma, T, N, n_paths):
 with st.spinner("Simulating price paths..."):
     paths, t = simulate_paths(p0, mu, sigma, T, N, n_paths)
 
-# Compute density (for visualization)
-def compute_density(paths, n_bins):
-    hist, bins = np.histogram(paths.ravel(), bins=n_bins, density=True)
-    return hist, bins
-
-hist, bins = compute_density(paths, n_bins)
-bin_centers = (bins[:-1] + bins[1:]) / 2
-density = hist / hist.max()
-
-# K-Means clustering for support/resistance (inspired by Hypersphere tutorial)
+# K-Means clustering for support/resistance
 try:
     manifold = Euclidean(dim=2)
-    # Concatenate multiple paths, similar to tutorial's cluster concatenation
     data = np.concatenate([np.vstack([t, paths[i]]).T for i in range(min(n_paths, 5))], axis=0)
     kmeans = RiemannianKMeans(space=manifold, n_clusters=n_clusters, tol=1e-3)
     kmeans.fit(data)
@@ -164,8 +152,7 @@ try:
     geodesic_points = geodesic(np.linspace(0, 1, n_points))
     geodesic_df = pd.DataFrame({
         "Time": geodesic_points[:, 0],
-        "Price": geodesic_points[:, 1],
-        "Path": "Geodesic"
+        "Price": geodesic_points[:, 1]
     })
 except Exception as e:
     st.error(f"Geodesic computation failed: {e}")
@@ -173,6 +160,15 @@ except Exception as e:
 
 # Matplotlib plot (inspired by Hypersphere tutorial)
 fig, ax = plt.subplots(figsize=(10, 6))
+# Plot all data points (gray)
+ax.scatter(data[:, 0], data[:, 1], color="grey", marker=".", alpha=0.5, label="Data Points")
+# Plot clustered points
+colors = ['red', 'blue', 'orange', 'purple', 'cyan', 'magenta', 'yellow', 'green', 'pink', 'brown']
+for i in range(n_clusters):
+    ax.scatter(data[labels == i, 0], data[labels == i, 1], color=colors[i % len(colors)], marker=".", alpha=0.7, label=f"Cluster {i}")
+# Plot cluster centers
+for i, c in enumerate(cluster_centers):
+    ax.scatter(c[0], c[1], color=colors[i % len(colors)], marker="*", s=200, label=f"Center {i}")
 # Plot simulated paths
 for i in range(min(n_paths, n_display_paths)):
     ax.plot(t, paths[i], color="grey", alpha=0.2, label="Simulated Paths" if i == 0 else None)
@@ -180,11 +176,12 @@ for i in range(min(n_paths, n_display_paths)):
 ax.plot(geodesic_df["Time"], geodesic_df["Price"], color="red", linewidth=2, label="Geodesic")
 # Plot support/resistance levels
 for i, sr in enumerate(support_resistance):
-    ax.axhline(y=sr, color="green", linestyle="--", label=f"Level {i}" if i < 2 else None)
+    ax.axhline(y=sr, color="green", linestyle="--", label=f"Support/Resistance {i}" if i < 2 else None)
 ax.set_xlabel("Time (hours)")
 ax.set_ylabel("BTC/USD Price")
 ax.set_title("BTC/USD Price Paths, Geodesic, and K-Means Support/Resistance Levels")
 ax.legend()
+plt.tight_layout()
 st.pyplot(fig)
 
 st.write("**K-Means Support/Resistance Levels:**", support_resistance)
