@@ -10,7 +10,6 @@ from scipy.interpolate import interp1d
 from scipy.stats import gaussian_kde
 from scipy.sparse.linalg import eigs
 from joblib import Parallel, delayed
-from numba import jit
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -97,7 +96,6 @@ def compute_geodesic(metric, t, p0, pT, T):
     points = geodesic(np.linspace(0, 1, len(t)))
     return pd.DataFrame({"Time": points[:, 0], "Price": points[:, 1], "Path": "Geodesic"})
 
-@jit(nopython=True)
 def compute_single_path(p0, T, N, dt, drift, diffusion, rng_seed):
     np.random.seed(rng_seed)
     path = np.zeros((N, 2))
@@ -108,7 +106,6 @@ def compute_single_path(p0, T, N, dt, drift, diffusion, rng_seed):
         dW = np.random.normal(0, np.sqrt(dt))
         stoch_term = np.array([0.0, diffusion[j] * dW])
         next_pos = pos + drift[j] * dt + stoch_term
-        # Clamp log-price to prevent overflow
         next_pos[1] = np.clip(next_pos[1], p0 - price_std, p0 + price_std)
         path[j + 1, :] = next_pos
     return path[:, 1]
@@ -126,16 +123,27 @@ def simulate_paths_manifold(metric, p0, T, N, n_paths, subsample_factor=0.2):
     drift = np.vstack([np.ones(N_coarse), mu]).T
     diffusion = np.sqrt(g_inv_22)
     
-    # Debug: Check for invalid sigma/mu
+    # Validate sigma and mu
     if np.any(~np.isfinite(sigma)) or np.any(~np.isfinite(mu)):
         st.warning("Invalid GARCH parameters detected. Using constant values.")
         sigma = np.full_like(sigma, np.mean(sigma[np.isfinite(sigma)]))
         mu = np.full_like(mu, np.mean(mu[np.isfinite(mu)]))
+        det = 1.0 * sigma**2 - mu**2
+        det = np.maximum(det, 1e-6)
+        g_inv_22 = 1.0 / det
+        drift = np.vstack([np.ones(N_coarse), mu]).T
+        diffusion = np.sqrt(g_inv_22)
     
-    paths_coarse = np.array(Parallel(n_jobs=-1)(
-        delayed(compute_single_path)(p0, T, N_coarse, dt, drift, diffusion, i)
-        for i in range(n_paths)
-    ))
+    try:
+        paths_coarse = np.array(Parallel(n_jobs=-1, backend='loky')(
+            delayed(compute_single_path)(p0, T, N_coarse, dt, drift, diffusion, i)
+            for i in range(n_paths)
+        ))
+    except Exception as e:
+        st.warning(f"Parallel execution failed: {e}. Falling back to sequential.")
+        paths_coarse = np.zeros((n_paths, N_coarse))
+        for i in range(n_paths):
+            paths_coarse[i, :] = compute_single_path(p0, T, N_coarse, dt, drift, diffusion, i)
     
     t = np.linspace(0, T, N)
     paths = np.zeros((n_paths, N))
@@ -178,7 +186,12 @@ def classify_regime(geodesic_df, prices, times):
     return "Mean Reverting"
 
 def visualize_manifold(metric, t_grid, p_grid):
-    SCALING_FACTOR = 1 / np.max([metric.sigma_interp(ti)**2 for ti in t_grid if np.isfinite(metric.sigma_interp(ti))]) * 1000
+    valid_t = [ti for ti in t_grid if np.isfinite(metric.sigma_interp(ti))]
+    if not valid_t:
+        st.warning("Invalid volatility data for heatmap. Using constant value.")
+        SCALING_FACTOR = 1000
+    else:
+        SCALING_FACTOR = 1 / np.max([metric.sigma_interp(ti)**2 for ti in valid_t]) * 1000
     g_pp_values = []
     for t_val in t_grid:
         cost = metric.metric_matrix([t_val, 0])[1, 1]
