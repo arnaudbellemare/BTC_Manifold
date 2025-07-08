@@ -7,18 +7,22 @@ from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 from geomstats.geometry.euclidean import Euclidean
+from geomstats.geometry.base import ExpSolver
+from geomstats.learning.kmeans import RiemannianKMeans
+import warnings
 import time
-
+warnings.filterwarnings("ignore")
 
 st.title("BTC/USD Price Analysis on Riemannian Manifold")
 
 # Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        super().__init__(space=Euclidean(dim=2))  # Define 2D Euclidean manifold
+        super().__init__(space=Euclidean(dim=2))
         self.sigma = sigma
         self.t = t
         self.T = T
+        self.exp_solver = ExpSolver()  # Set correct solver
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
@@ -29,7 +33,6 @@ class VolatilityMetric(RiemannianMetric):
 @st.cache_data
 def fetch_kraken_data(symbols, timeframe, limit):
     exchange = ccxt.kraken()
-    # Fetch available trading pairs
     try:
         markets = exchange.load_markets()
         available_symbols = list(markets.keys())
@@ -44,7 +47,7 @@ def fetch_kraken_data(symbols, timeframe, limit):
         if symbol not in available_symbols:
             st.warning(f"Symbol {symbol} not in Kraken markets")
             continue
-        for attempt in range(12):  # 12 retries
+        for attempt in range(12):
             try:
                 ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -57,7 +60,7 @@ def fetch_kraken_data(symbols, timeframe, limit):
                     st.warning(f"Invalid data for {symbol}: len={len(df)}, timestamps_valid={df['timestamp'].notnull().all()}, close_valid={df['close'].notnull().all()}, close_positive={df['close'].gt(0).all()} (attempt {attempt+1})")
             except ccxt.NetworkError as e:
                 st.warning(f"Network error for {symbol} (attempt {attempt+1}): {e}")
-                time.sleep(15)  # 15-second delay
+                time.sleep(15)
             except Exception as e:
                 st.warning(f"Error for {symbol} (attempt {attempt+1}): {e}")
     st.error("Failed to fetch valid data from Kraken. Check API status or symbols at https://api.kraken.com/0/public/AssetPairs")
@@ -65,13 +68,14 @@ def fetch_kraken_data(symbols, timeframe, limit):
 
 # Parameters
 st.sidebar.header("Parameters")
-n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 50, step=50)  # Low default
+n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 50, step=50)
 n_bins = st.sidebar.slider("Number of Bins for Density", 20, 100, 50, step=5)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
+n_clusters = st.sidebar.slider("Number of K-Means Clusters", 2, 10, 2, step=1)  # Added for K-means
 
 symbols = ['BTC/USD', 'XXBTZUSD', 'XBT/USD', 'BTCUSDT', 'BTC-USD', 'XBTUSDT']
 timeframe = '1h'
-limit = 10  # Minimal limit
+limit = 10
 df = fetch_kraken_data(symbols, timeframe, limit)
 
 # Validate DataFrame
@@ -126,7 +130,7 @@ def simulate_paths(p0, mu, sigma, T, N, n_paths):
 with st.spinner("Simulating price paths..."):
     paths, t = simulate_paths(p0, mu, sigma, T, N, n_paths)
 
-# Compute density
+# Compute density (for visualization)
 def compute_density(paths, n_bins):
     hist, bins = np.histogram(paths.ravel(), bins=n_bins, density=True)
     return hist, bins
@@ -135,13 +139,22 @@ hist, bins = compute_density(paths, n_bins)
 bin_centers = (bins[:-1] + bins[1:]) / 2
 density = hist / hist.max()
 
-# Support/resistance
-peaks, _ = find_peaks(density, height=0.3)
-support_resistance = bin_centers[peaks]
+# K-Means clustering for support/resistance
+try:
+    manifold = Euclidean(dim=2)
+    metric = VolatilityMetric(sigma, t, T)
+    data = np.vstack([t, paths[0]]).T  # Use first path for clustering
+    kmeans = RiemannianKMeans(manifold=manifold, n_clusters=n_clusters, tol=1e-3)
+    kmeans.fit(data)
+    labels = kmeans.labels_
+    cluster_centers = kmeans.cluster_centers_
+    support_resistance = cluster_centers[:, 1]  # Price coordinates of centers
+except Exception as e:
+    st.error(f"K-Means clustering failed: {e}")
+    st.stop()
 
 # Geodesic with geomstats
 try:
-    metric = VolatilityMetric(sigma, t, T)
     geodesic = metric.geodesic(
         initial_point=np.array([0.0, p0]),
         initial_tangent_vec=np.array([1.0, mu * 0.001])
@@ -191,10 +204,10 @@ sr_lines = alt.Chart(sr_df).mark_rule(
 )
 
 chart = (paths + geodesic + sr_lines).properties(
-    title="BTC/USD Price Paths, Geodesic, and Support/Resistance Levels",
+    title="BTC/USD Price Paths, Geodesic, and K-Means Support/Resistance Levels",
     width=800,
     height=400
 )
 
 st.altair_chart(chart, use_container_width=True)
-st.write("**Support/Resistance Levels:**", support_resistance)
+st.write("**K-Means Support/Resistance Levels:**", support_resistance)
