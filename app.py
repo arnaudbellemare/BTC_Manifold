@@ -5,9 +5,9 @@ import pandas as pd
 import altair as alt
 from scipy.signal import find_peaks
 from arch import arch_model
-from geomstats.geometry.riemannian_metric import RiemannianMetric  # Updated importimport warnings
-import time
+from geomstats.geometry.riemannian_metric import RiemannianMetric
 import warnings
+import time
 warnings.filterwarnings("ignore")
 
 st.title("BTC/USD Price Analysis on Riemannian Manifold")
@@ -30,18 +30,20 @@ class VolatilityMetric(RiemannianMetric):
 def fetch_kraken_data(symbol, timeframe, limit):
     exchange = ccxt.kraken()
     since = int((time.time() - limit * 3600) * 1000)  # Last 'limit' hours
-    for _ in range(3):
-        try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-            return df
-        except ccxt.NetworkError:
-            time.sleep(2)
-    st.error("Failed to fetch data from Kraken")
+    for symbol_try in [symbol, 'BTC/USD']:  # Fallback symbol
+        for _ in range(3):
+            try:
+                ohlcv = exchange.fetch_ohlcv(symbol_try, timeframe, since, limit)
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                if len(df) >= 10:  # Ensure sufficient data
+                    return df
+            except ccxt.NetworkError:
+                time.sleep(3)
+    st.error("Failed to fetch data from Kraken after trying multiple symbols")
     return None
 
-# Simulate price paths (no Cython, pure NumPy)
+# Simulate price paths (pure NumPy)
 def simulate_paths(p0, mu, sigma, T, N, n_paths):
     dt = T / N
     t = np.linspace(0, T, N)
@@ -52,7 +54,7 @@ def simulate_paths(p0, mu, sigma, T, N, n_paths):
         paths[:, j] = paths[:, j-1] + mu * dt + sigma[j-1] * dW[:, j-1]
     return paths, t
 
-# Compute density (no Cython)
+# Compute density
 def compute_density(paths, n_bins):
     hist, bins = np.histogram(paths.ravel(), bins=n_bins, density=True)
     return hist, bins
@@ -63,9 +65,9 @@ n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 200, step=50)
 n_bins = st.sidebar.slider("Number of Bins for Density", 20, 100, 50, step=5)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
 
-symbol = 'BTC/USD'
+symbol = 'XXBTZUSD'
 timeframe = '1h'
-limit = 500
+limit = 300  # Reduced for reliability
 df = fetch_kraken_data(symbol, timeframe, limit)
 
 if df is None or df.empty or len(df) < 10:
@@ -74,6 +76,11 @@ if df is None or df.empty or len(df) < 10:
 
 prices = df['close'].values
 times = (df['timestamp'] - df['timestamp'].iloc[0]) / (1000 * 3600)
+
+# Ensure times is valid
+if len(times) < 2:
+    st.error("Invalid timestamp data from Kraken")
+    st.stop()
 
 # GARCH volatility
 returns = 100 * np.diff(prices) / prices[:-1]
@@ -113,7 +120,7 @@ try:
     metric = VolatilityMetric(sigma, t, T)
     geodesic = metric.geodesic(
         initial_point=np.array([0.0, p0]),
-        initial_tangent_vec=np.array([1.0, mu])
+        initial_tangent_vec=np.array([1.0, mu * 0.1])  # Adjusted for stability
     )
     n_points = N
     geodesic_points = geodesic(np.linspace(0, 1, n_points))
