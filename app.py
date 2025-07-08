@@ -251,9 +251,15 @@ for i in range(nt - 1):
 
 u_density = u[-1, :]
 
+# --- FIX: Instantiate the metric for the final time T ---
+# This object is needed for the subsequent geometric analysis (curvature, geodesics).
+# We use the full historical and simulated data to define it.
+metric = AdvancedRiemannianMetric(sigma, t, T, prices, variances)
+
 # Identify support and resistance with curvature
 du = np.gradient(u_density, dp)
 d2u = np.gradient(du, dp)
+# The next line will now work because 'metric' is defined.
 ricci = np.array([metric.ricci_curvature(np.array([T, p]))[1, 1] for p in p_grid])
 support_idx = np.where((du > 0) & (d2u < 0) & (u_density > 0.1 * u_density.max()) & (ricci < 0))[0]
 resistance_idx = np.where((du < 0) & (d2u > 0) & (u_density > 0.1 * u_density.max()) & (ricci > 0))[0]
