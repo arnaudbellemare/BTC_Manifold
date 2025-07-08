@@ -7,9 +7,6 @@ from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 # Add this line with your other imports
-# Add this with your other imports
-from geomstats.numerics.geodesic import ScipySolveIVP
-from geomstats.geometry.euclidean import Euclidean # You should already have this from the last fix
 import warnings
 import time
 warnings.filterwarnings("ignore")
@@ -19,30 +16,14 @@ st.title("BTC/USD Price Analysis on Riemannian Manifold")
 # Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        # 1. Define the manifold (a 2D Euclidean space)
-        space = Euclidean(dim=2)
-        # 2. Pass the MANIFOLD OBJECT to the parent class constructor
-        super().__init__(space=space)
-        
-        # 3. NEW: Instantiate a numerical solver and assign it to self.exp_solver
-        # This tells geomstats HOW to compute the geodesic for this custom metric.
-        self.exp_solver = ScipySolveIVP(space)
-        
+        super().__init__(dim=2)
         self.sigma = sigma
         self.t = t
         self.T = T
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
-        
-        # Defensive check to prevent division by zero if T is 0
-        if self.T == 0:
-            idx = 0
-        else:
-            # Clip the time value to be within the valid range [0, T] before calculating index
-            t_val_clipped = np.clip(t_val, 0, self.T)
-            idx = int(t_val_clipped / self.T * (len(self.sigma) - 1))
-            
+        idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         return np.diag([1.0, self.sigma[idx]**2])
 # Fetch Kraken data
 @st.cache_data
