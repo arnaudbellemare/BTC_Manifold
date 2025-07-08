@@ -6,6 +6,7 @@ import altair as alt
 from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
+from geomstats.geometry.euclidean import Euclidean  # Added for manifold
 import warnings
 import time
 warnings.filterwarnings("ignore")
@@ -15,11 +16,10 @@ st.title("BTC/USD Price Analysis on Riemannian Manifold")
 # Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        super().__init__()  # Remove dim argument
+        super().__init__(space=Euclidean(dim=2))  # Define 2D Euclidean manifold
         self.sigma = sigma
         self.t = t
         self.T = T
-        self._space = {'dim': 2}  # Define dimension for manifold
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
@@ -109,7 +109,7 @@ else:
     st.stop()
 
 p0 = prices[0]
-T = times.iloc[-1]  # Safe after validation
+T = times.iloc[-1]  # Use pandas iloc indexing
 N = len(prices)
 mu = np.mean(returns) * N / T / 100 if len(returns) > 0 else 0.0
 
