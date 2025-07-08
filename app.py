@@ -7,7 +7,7 @@ from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 from geomstats.numerics.ivp import ScipySolveIVP
 from scipy.integrate import solve_ivp
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde, rankdata
 from scipy.signal import find_peaks
 import time
 import warnings
@@ -16,12 +16,10 @@ warnings.filterwarnings("ignore")
 st.set_page_config(layout="wide")
 st.title("BTC/USD Price Analysis on a Volatility-Weighted Manifold")
 
-# Volatility-weighted metric with all compatibility and mathematical fixes
+# Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        # The definitive compatibility fix for old geomstats versions
         self.dim = 2
-        
         self.sigma = sigma
         self.t = t
         self.T = T
@@ -33,26 +31,21 @@ class VolatilityMetric(RiemannianMetric):
         return np.diag([1.0, sigma_val**2])
 
     def christoffel_symbols(self, base_point):
-        # Mathematically rigorous calculation for this specific metric
         t_val = base_point[0]
         idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         sigma_val = max(self.sigma[idx], 0.01)
-        
         eps = 1e-6
         t_plus, t_minus = min(t_val + eps, self.T), max(t_val - eps, 0)
         idx_plus = int(np.clip(t_plus / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         idx_minus = int(np.clip(t_minus / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
-        
         d_sigma_dt = (self.sigma[idx_plus] - self.sigma[idx_minus]) / (2 * eps)
-
         gamma = np.zeros((2, 2, 2))
         gamma[1, 0, 1] = (1 / sigma_val) * d_sigma_dt
         gamma[1, 1, 0] = gamma[1, 0, 1]
         gamma[0, 1, 1] = -sigma_val * d_sigma_dt
-        
         return gamma
 
-# Robust data fetching function
+# Fetch Kraken data
 @st.cache_data
 def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
     exchange = ccxt.kraken()
@@ -74,31 +67,31 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
     sim_prices = 70000 + np.cumsum(np.random.normal(0, 500, 168))
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'timestamp': sim_t.astype(np.int64) // 10**6})
 
-# Corrected manifold visualization function
-def visualize_manifold(metric, t_grid, p_grid):
+# --- DEFINITIVE FIX: Function to visualize the manifold using rank-based coloring ---
+def visualize_manifold(sigma_data, t_grid):
     st.subheader("Visualizing the Market Manifold")
-    st.write("This heatmap shows the 'cost' of price movement over time. Yellow areas represent high volatility, where the manifold is 'stretched' and price movement is difficult. Dark areas are low-volatility regions where price movement is easier.")
+    st.write("This heatmap shows the relative volatility over time. Yellow areas are periods of the highest volatility in the dataset, where price movement is 'difficult'. Dark areas are the lowest volatility periods.")
     
-    SCALING_FACTOR = 10000 
+    # 1. Use the GARCH sigma values directly, as they represent the volatility over time.
+    costs = sigma_data[:len(t_grid)]
     
-    g_pp_values = []
-    for t_val in t_grid:
-        cost = metric.metric_matrix([t_val, 0])[1, 1]
-        scaled_cost = cost * SCALING_FACTOR
-        for p_val in p_grid:
-            g_pp_values.append({'Time': t_val, 'Price': p_val, 'Cost': scaled_cost})
+    # 2. Convert costs to rank percentiles to guarantee a full color spectrum.
+    ranks = rankdata(costs, "average") / len(costs) # Result is from 0.0 to 1.0
     
-    g_df = pd.DataFrame(g_pp_values)
-    min_cost, max_cost = g_df['Cost'].min(), g_df['Cost'].max()
-
-    heatmap = alt.Chart(g_df).mark_rect().encode(
-        x='Time:Q',
-        y=alt.Y('Price:Q', scale=alt.Scale(zero=False)),
-        color=alt.Color('Cost:Q', 
-                        scale=alt.Scale(scheme='viridis', domain=[min_cost, max_cost]), 
-                        legend=alt.Legend(title=f"Cost (σ² × {SCALING_FACTOR})"))
+    # 3. Create a DataFrame for Altair.
+    heatmap_df = pd.DataFrame({
+        'Time': t_grid, 
+        'Volatility': costs, # For tooltip
+        'Rank': ranks # For color
+    })
+    
+    heatmap = alt.Chart(heatmap_df).mark_rect().encode(
+        x=alt.X('Time:Q', title="Time (hours)"),
+        color=alt.Color('Rank:Q', 
+                        scale=alt.Scale(scheme='viridis'), 
+                        legend=alt.Legend(title="Volatility Percentile"))
     ).properties(
-        title="Market Manifold Geometry",
+        title="Market Manifold Geometry (Colored by Volatility Rank)",
     )
     
     return heatmap
@@ -111,7 +104,7 @@ epsilon_factor = st.sidebar.slider("Probability Range Factor", 0.1, 1.0, 0.25, s
 
 df = fetch_kraken_data(['BTC/USD', 'XBT/USD'], '1h', pd.to_datetime("2025-07-01"), pd.to_datetime("2025-07-07 23:59:59"), 168)
 
-# Data Preparation
+# Data Prep
 prices = df['close'].values
 times = (df['timestamp'] - df['timestamp'].iloc[0]) / (1000 * 3600) if not df.empty else np.array([])
 T = times.iloc[-1] if len(times) > 0 else 168
@@ -127,7 +120,7 @@ if len(returns) > 5:
         sigma = np.pad(sigma, (1, 0), mode='edge')
     except Exception as e: st.warning(f"GARCH failed: {e}. Using constant volatility.")
 
-# Simulate price paths (unconstrained)
+# Simulate price paths
 def simulate_paths(p0, mu, sigma, T, N, n_paths):
     if N == 0: return np.array([[p0]]), np.array([0])
     dt = T / (N - 1) if N > 1 else T
@@ -218,12 +211,19 @@ with col1:
 
 with col2:
     # DISPLAY THE CORRECTED MANIFOLD VISUALIZATION
-    viz_p_grid = np.linspace(prices.min(), prices.max(), 50)
-    manifold_heatmap = visualize_manifold(metric, t, viz_p_grid)
+    manifold_heatmap = visualize_manifold(sigma, t)
     history_df = pd.DataFrame({'Time': times, 'Price': prices})
     history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2.5, opacity=0.7).encode(x='Time:Q', y='Price:Q')
     
-    st.altair_chart((manifold_heatmap + history_line).properties(height=300).interactive(), use_container_width=True)
+    # Layer the heatmap and the line chart, setting the y-axis scale for the line
+    final_viz = alt.layer(
+        manifold_heatmap, 
+        history_line
+    ).resolve_scale(
+        y = 'independent'
+    ).properties(height=300).interactive()
+
+    st.altair_chart(final_viz, use_container_width=True)
     
     st.write(f"**Expected Final Price:** ${np.mean(final_prices):,.2f}")
     st.write("**Support Levels (BTC/USD):**")
