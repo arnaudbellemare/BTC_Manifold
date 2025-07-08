@@ -93,6 +93,19 @@ def visualize_manifold(sigma_data, t_grid, history_df):
     end_date = pd.to_datetime("2025-07-07 23:59:59")
     viz_df['Time'] = start_date + pd.to_timedelta(t_grid, unit='h')
 
+    # Validate and convert history_df
+    if history_df.empty or 'Time' not in history_df or 'Price' not in history_df:
+        st.warning("Invalid history_df. Using dummy data.")
+        history_df = pd.DataFrame({
+            'Time': start_date + pd.to_timedelta(t_grid, unit='h'),
+            'Price': np.linspace(105000, 110000, len(t_grid))
+        })
+    else:
+        history_df['Time'] = pd.to_datetime(history_df['Time'], unit='s', origin=pd.Timestamp("1970-01-01"))
+        if history_df['Price'].isna().all():
+            st.warning("No valid price data. Using dummy prices.")
+            history_df['Price'] = np.linspace(105000, 110000, len(history_df))
+
     # Time slider
     time_brush = alt.selection_interval(bind='scales', encodings=['x'])
     
@@ -103,13 +116,13 @@ def visualize_manifold(sigma_data, t_grid, history_df):
         color=alt.Color('Rank:Q', scale=alt.Scale(scheme='viridis'), legend=alt.Legend(title="Volatility Percentile"))
     ).add_selection(time_brush)
 
-    # History line (ensure Time is in datetime format)
-    history_df['Time'] = pd.to_datetime(history_df['Time'], unit='s', origin=pd.Timestamp("1970-01-01"))
+    # History line
     history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2).encode(
         x='Time:T',
-        y=alt.Y('Price:Q', title="Price", scale=alt.Scale(zero=False))
+        y=alt.Y('Price:Q', title="Price", scale=alt.Scale(domain=[105000, 110000], zero=False))
     ).transform_filter(time_brush)
 
+    # Combine charts with adjusted layering
     final_chart = alt.layer(gradient_background, history_line).resolve_scale(
         y='independent'
     ).properties(
