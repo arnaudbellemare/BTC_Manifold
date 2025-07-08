@@ -7,7 +7,7 @@ from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 from geomstats.geometry.euclidean import Euclidean
-from geomstats.geometry.base import ExpSolver
+from geomstats.numerics.ivp import ScipySolveIVP  # Correct solver
 from geomstats.learning.kmeans import RiemannianKMeans
 import warnings
 import time
@@ -22,7 +22,7 @@ class VolatilityMetric(RiemannianMetric):
         self.sigma = sigma
         self.t = t
         self.T = T
-        self.exp_solver = ExpSolver()  # Set correct solver
+        self.exp_solver = ScipySolveIVP()  # Correct solver
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
@@ -71,7 +71,7 @@ st.sidebar.header("Parameters")
 n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 50, step=50)
 n_bins = st.sidebar.slider("Number of Bins for Density", 20, 100, 50, step=5)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
-n_clusters = st.sidebar.slider("Number of K-Means Clusters", 2, 10, 2, step=1)  # Added for K-means
+n_clusters = st.sidebar.slider("Number of K-Means Clusters", 2, 10, 2, step=1)
 
 symbols = ['BTC/USD', 'XXBTZUSD', 'XBT/USD', 'BTCUSDT', 'BTC-USD', 'XBTUSDT']
 timeframe = '1h'
