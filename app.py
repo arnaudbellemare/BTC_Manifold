@@ -186,18 +186,40 @@ df = fetch_and_process_data(days=days_history)
 if df is not None:
     # Calculate returns and covariance
     returns = df[['BTC_close', 'ETH_close']].pct_change().dropna()
-    cov_series = returns.rolling(window=rolling_window).cov().unstack()
+    
+    # Compute rolling covariance
+    cov_series = returns.rolling(window=rolling_window).cov().unstack(level=0)
+    
+    # Debug: Print cov_series structure
+    st.write("Debug: cov_series columns:", cov_series.columns)
+    st.write("Debug: Sample cov_series row:", cov_series.iloc[0])
+    
+    # Rename columns to ensure correct structure
+    expected_columns = [('BTC_close', 'BTC_close'), ('BTC_close', 'ETH_close'), 
+                        ('ETH_close', 'BTC_close'), ('ETH_close', 'ETH_close')]
+    if not all(col in cov_series.columns for col in expected_columns):
+        st.error("Covariance matrix does not contain expected columns. Found columns: " + str(cov_series.columns))
+        st.stop()
+    
+    cov_series = cov_series[expected_columns]
     cov_series.columns = ['BTC_BTC', 'BTC_ETH', 'ETH_BTC', 'ETH_ETH']
-    cov_series = cov_series[['BTC_BTC', 'BTC_ETH', 'ETH_ETH']].dropna()
+    cov_series = cov_series.dropna()
 
     # Calculate inverse covariance (Fisher Metric)
     inv_cov_list = []
     for idx, row in cov_series.iterrows():
-        cov_matrix = np.array([[row.BTC_BTC, row.BTC_ETH], [row.ETH_BTC, row.ETH_ETH]])
         try:
-            inv_cov_list.append(pd.Series(inv(cov_matrix).flatten(), index=['inv_11', 'inv_12', 'inv_21', 'inv_22'], name=idx))
+            cov_matrix = np.array([[row['BTC_BTC'], row['BTC_ETH']],
+                                   [row['ETH_BTC'], row['ETH_ETH']]])
+            inv_cov = inv(cov_matrix)
+            inv_cov_list.append(pd.Series(inv_cov.flatten(), 
+                                        index=['inv_11', 'inv_12', 'inv_21', 'inv_22'], 
+                                        name=idx))
         except LinAlgError:
-            inv_cov_list.append(pd.Series(np.eye(2).flatten(), index=['inv_11', 'inv_12', 'inv_21', 'inv_22'], name=idx))
+            # Fallback to identity matrix if singular
+            inv_cov_list.append(pd.Series(np.eye(2).flatten(), 
+                                        index=['inv_11', 'inv_12', 'inv_21', 'inv_22'], 
+                                        name=idx))
     inv_cov_series = pd.DataFrame(inv_cov_list)
 
     # Calculate volume factor
@@ -278,7 +300,7 @@ if df is not None:
     with col2:
         eth_support_levels, eth_resistance_levels = analyze_path_distribution(paths[:, -1, 1], 'ETH')
 
-    # --- NEW: Price Graph with Support/Resistance Grid ---
+    # --- Price Graph with Support/Resistance Grid ---
     st.header("Price with Support and Resistance Grid")
     col1, col2 = st.columns(2)
 
