@@ -5,6 +5,7 @@ import pandas as pd
 from scipy.integrate import solve_ivp
 from scipy.linalg import inv, LinAlgError
 from geomstats.geometry.riemannian_metric import RiemannianMetric
+from geomstats.geometry.euclidean import Euclidean  # Added for base manifold
 import plotly.graph_objects as go
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
@@ -34,8 +35,9 @@ class FisherVolumeMetric(RiemannianMetric):
     is the time-varying, volume-weighted inverse covariance matrix.
     """
     def __init__(self, inv_cov_series, volume_factor_series):
-        # Initialize with dimension and default signature for Euclidean space
-        super().__init__(dim=3, signature=(3, 0))  # 3 positive eigenvalues, 0 negative
+        # Define a 3D Euclidean manifold as the base space
+        self.manifold = Euclidean(dim=3)
+        super().__init__(manifold=self.manifold)  # Initialize with manifold
         self.inv_cov_series = inv_cov_series
         self.volume_factor_series = volume_factor_series
         self.n_times = len(inv_cov_series)
@@ -317,7 +319,7 @@ if df is not None:
         dt = projection_hours / len(aligned_prices)
         mu = returns.mean().values
         last_cov = returns.iloc[-rolling_window:].cov().values
-        L = np.linalg.cholesky(last_cov) # Cholesky decomposition for correlated noise
+        L = np.linalg.cholesky(last_cov)  # Cholesky decomposition for correlated noise
 
         p0 = aligned_prices.iloc[-1].values
         num_steps = int(projection_hours / (T_total_hours / len(aligned_prices)))
@@ -344,7 +346,7 @@ if df is not None:
     
     # Projected Paths
     proj_times = pd.to_datetime(aligned_prices.index[-1]) + pd.Timedelta(hours=dt) * np.arange(num_steps)
-    for i in range(min(n_paths, 100)): # Display a subset of paths
+    for i in range(min(n_paths, 100)):  # Display a subset of paths
         fig.add_trace(go.Scatter3d(
             x=proj_times, y=paths[i, :, 0], z=paths[i, :, 1],
             mode='lines', line=dict(color='rgba(128,128,128,0.3)'), showlegend=False
