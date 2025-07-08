@@ -7,6 +7,7 @@ from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 from geomstats.geometry.euclidean import Euclidean
+from geomstats.geometry.base import ExpSolver
 from geomstats.learning.kmeans import RiemannianKMeans
 import warnings
 import time
@@ -21,6 +22,7 @@ class VolatilityMetric(RiemannianMetric):
         self.sigma = sigma
         self.t = t
         self.T = T
+        self.exp_solver = ExpSolver()  # Use correct solver
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
@@ -137,10 +139,11 @@ hist, bins = compute_density(paths, n_bins)
 bin_centers = (bins[:-1] + bins[1:]) / 2
 density = hist / hist.max()
 
-# K-Means clustering for support/resistance
+# K-Means clustering for support/resistance (inspired by Hypersphere tutorial)
 try:
     manifold = Euclidean(dim=2)
-    data = np.vstack([t, paths[0]]).T  # Use first path for clustering
+    # Concatenate multiple paths, similar to tutorial's cluster concatenation
+    data = np.concatenate([np.vstack([t, paths[i]]).T for i in range(min(n_paths, 5))], axis=0)
     kmeans = RiemannianKMeans(space=manifold, n_clusters=n_clusters, tol=1e-3)
     kmeans.fit(data)
     labels = kmeans.labels_
