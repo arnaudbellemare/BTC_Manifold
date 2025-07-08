@@ -9,14 +9,14 @@ from geomstats.numerics.geodesic import ExpODESolver
 from geomstats.numerics.ivp import ScipySolveIVP
 from scipy.integrate import solve_ivp
 from scipy.optimize import root
-from scipy.signal import find_peaks
 from scipy.sparse import diags, csr_matrix
 from scipy.sparse.linalg import spsolve
+from sklearn.cluster import KMeans
 import time
 import warnings
 warnings.filterwarnings("ignore")
 
-st.title("BTC/USD Geometric Analysis with Support & Resistance")
+st.title("Geometric & K-Means Clustering Market Analysis")
 
 # --- ADVANCED RIEMANNIAN METRIC (WITH COMPATIBILITY FIX) ---
 class AdvancedRiemannianMetric(RiemannianMetric):
@@ -58,12 +58,10 @@ class AdvancedRiemannianMetric(RiemannianMetric):
         return christoffels
     
     def log(self, point, base_point):
-        point = np.asarray(point)
-        base_point = np.asarray(base_point)
+        point, base_point = np.asarray(point), np.asarray(base_point)
         def objective(velocity):
             geodesic_path = self.exp_solver.solve(velocity, base_point)
-            final_point = geodesic_path[-1]
-            return final_point - point
+            return geodesic_path[-1] - point
         initial_guess = point - base_point
         sol = root(objective, initial_guess, method='hybr', tol=1e-5)
         if not sol.success: return point - base_point
@@ -92,6 +90,7 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
 st.sidebar.header("Parameters")
 n_paths = st.sidebar.slider("Number of Paths", 100, 2000, 1000, step=100)
 n_display_paths = st.sidebar.slider("Paths to Display", 10, 200, 50, step=10)
+k_clusters = st.sidebar.slider("Number of Price Clusters (K)", 2, 8, 4, step=1)
 
 df = fetch_kraken_data(['BTC/USD', 'XBT/USD'], '1h', pd.to_datetime("2025-07-01"), pd.to_datetime("2025-07-07 23:59:59"), 168)
 
@@ -128,8 +127,8 @@ def simulate_paths_heston(p0, mu, v0, kappa, theta, xi, rho, T, N, n_paths):
 with st.spinner("Simulating Heston paths..."):
     paths, t, variances = simulate_paths_heston(p0, mu / (365*24), v0, kappa, theta, xi, rho, T, N, n_paths)
 
-# --- FOKKER-PLANCK SOLVER WITH STABILITY FIXES ---
-nt, n_p_steps = 400, 500 # Increased steps for stability
+# Fokker-Planck Solver with Stability Fixes
+nt, n_p_steps = 400, 500
 t_grid = np.linspace(0, T, nt)
 p_grid = np.linspace(paths.min() * 0.9, paths.max() * 1.1, n_p_steps)
 dt_fd, dp = (t_grid[1] - t_grid[0]), (p_grid[1] - p_grid[0])
@@ -148,64 +147,50 @@ with st.spinner("Solving Fokker-Planck on the manifold..."):
         g_inv_pp = 1 / g_p[:, 1, 1]
         sqrt_det_g = np.sqrt(g_p[:, 1, 1])
         L_LB_op = D_bwd @ diags(sqrt_det_g * g_inv_pp) @ D_fwd
-        
-        # --- FIX 1: Stabilize the diffusion term by clipping its coefficient ---
         diffusion_coeff = 0.5 * p_grid**2
-        max_diffusion = np.percentile(diffusion_coeff, 99) # Prevent explosion from large prices
+        max_diffusion = np.percentile(diffusion_coeff, 99)
         clipped_diffusion_coeff = np.clip(diffusion_coeff, 0, max_diffusion)
         L_diffusion = diags(clipped_diffusion_coeff) @ L_LB_op
-        
         L_drift_op = diags((mu / (365*24)) * p_grid) @ D_fwd
-        L_diffusion.setdiag(0, k=0); L_diffusion.setdiag(0, k=-1) # Boundary conditions
+        L_diffusion.setdiag(0, k=0); L_diffusion.setdiag(0, k=-1)
         L_drift_op.setdiag(0, k=0); L_drift_op.setdiag(0, k=-1)
         L = L_diffusion + L_drift_op
         LHS = I - 0.5 * dt_fd * L
         RHS = (I + 0.5 * dt_fd * L) @ u[i, :]
         u_new = spsolve(LHS, RHS)
-        
-        # --- FIX 2: Add sanity check to detect and handle numerical instability ---
         if not np.all(np.isfinite(u_new)):
             st.warning(f"Numerical instability detected at step {i+1}. Halting Fokker-Planck evolution.")
-            u[i+1:, :] = u[i, :] # Fill remaining steps with the last valid one
-            break # Exit the loop
-            
+            u[i+1:, :] = u[i, :]
+            break
         u[i + 1, :] = np.maximum(u_new, 0)
         norm = np.trapz(u[i + 1, :], p_grid)
         if norm > 1e-9: u[i + 1, :] /= norm
 
-# --- ANALYSIS WITH ROBUST FALLBACKS ---
+# --- K-MEANS CLUSTERING FOR SUPPORT & RESISTANCE ---
 u_density = u[-1, :]
 expected_price = np.trapz(p_grid * u_density, p_grid)
-V_eff = -np.log(u_density + 1e-20)
-V_eff -= V_eff.min()
-potential_minima_idx, _ = find_peaks(-V_eff, distance=int(n_p_steps/20), height=-np.log(0.8))
-stable_levels = p_grid[potential_minima_idx]
-support_levels = [level for level in stable_levels if level < expected_price]
-resistance_levels = [level for level in stable_levels if level > expected_price]
 
-# --- FIX 3: Robust fallback for S/R levels to guarantee output ---
-if not support_levels and np.isfinite(expected_price):
-    support_levels = [np.quantile(p_grid[u_density > 1e-6], 0.25)]
-if not resistance_levels and np.isfinite(expected_price):
-    resistance_levels = [np.quantile(p_grid[u_density > 1e-6], 0.75)]
+# 1. Sample from the final probability distribution
+n_samples = 10000
+sampled_prices = np.random.choice(p_grid, size=n_samples, p=u_density)
 
-# Calculate Hit Probabilities
-final_std_dev = np.sqrt(np.trapz((p_grid - expected_price)**2 * u_density, p_grid))
-epsilon = 0.25 * final_std_dev if np.isfinite(final_std_dev) and final_std_dev > 0 else 500
+# 2. Run K-Means to find cluster centers
+kmeans = KMeans(n_clusters=k_clusters, random_state=42, n_init='auto').fit(sampled_prices.reshape(-1, 1))
+cluster_centers = sorted(kmeans.cluster_centers_.flatten())
+
+# 3. Classify centers and calculate probabilities based on cluster population
+support_levels, resistance_levels = [], []
 support_probs, resistance_probs = [], []
-total_support_prob, total_resistance_prob = 0, 0
-for s_level in support_levels:
-    mask = (p_grid >= s_level - epsilon) & (p_grid <= s_level + epsilon)
-    prob = np.trapz(u_density[mask], p_grid[mask])
-    support_probs.append(prob)
-    total_support_prob += prob
-for r_level in resistance_levels:
-    mask = (p_grid >= r_level - epsilon) & (p_grid <= r_level + epsilon)
-    prob = np.trapz(u_density[mask], p_grid[mask])
-    resistance_probs.append(prob)
-    total_resistance_prob += prob
-if total_support_prob > 0: support_probs = [p / total_support_prob for p in support_probs]
-if total_resistance_prob > 0: resistance_probs = [p / total_resistance_prob for p in resistance_probs]
+labels = kmeans.labels_
+for i, center in enumerate(cluster_centers):
+    cluster_population = np.sum(labels == i)
+    probability = cluster_population / n_samples
+    if center < expected_price:
+        support_levels.append(center)
+        support_probs.append(probability)
+    else:
+        resistance_levels.append(center)
+        resistance_probs.append(probability)
 
 # Geodesic Calculation
 metric = AdvancedRiemannianMetric(sigma, t, T, prices, variances)
@@ -224,7 +209,7 @@ except Exception as e:
     st.error(f"Geodesic computation failed: {e}. Using linear approximation.")
     geodesic_df = pd.DataFrame({"Time": t, "Price": p0 + initial_velocity[1] * t, "Path": "Geodesic"})
 
-# --- VISUALIZATION WITH SEPARATE S/R ---
+# --- VISUALIZATION ---
 path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} for i in range(min(n_paths, n_display_paths)) for j in range(N)]
 plot_df = pd.concat([pd.DataFrame(path_data), geodesic_df])
 support_df = pd.DataFrame({"Price": support_levels})
@@ -237,14 +222,11 @@ resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=
 chart = (path_lines + geodesic_line + support_lines + resistance_lines).properties(title="Price Dynamics, Geodesic, Support (Green), and Resistance (Red)", width=800, height=500).interactive()
 
 st.altair_chart(chart, use_container_width=True)
-st.write(f"**Expected Final Price:** ${expected_price:,.2f}" if np.isfinite(expected_price) else "**Expected Final Price:** Calculation failed due to instability.")
-st.write("**Support Levels (BTC/USD):**")
+st.write(f"**Expected Final Price:** ${expected_price:,.2f}" if np.isfinite(expected_price) else "**Expected Final Price:** Calculation failed.")
+st.write(f"**K-Means Price Clusters (k={k_clusters}):**")
 if support_levels:
-    st.dataframe(pd.DataFrame({'Level': support_levels, 'Hit Probability': support_probs}).style.format({'Level': '${:,.2f}', 'Hit Probability': '{:.1%}'}))
-else:
-    st.write("No distinct support levels found.")
-st.write("**Resistance Levels (BTC/USD):**")
+    st.write("**Support Levels (BTC/USD):**")
+    st.dataframe(pd.DataFrame({'Level': support_levels, 'Cluster Probability': support_probs}).style.format({'Level': '${:,.2f}', 'Cluster Probability': '{:.1%}'}))
 if resistance_levels:
-    st.dataframe(pd.DataFrame({'Level': resistance_levels, 'Hit Probability': resistance_probs}).style.format({'Level': '${:,.2f}', 'Hit Probability': '{:.1%}'}))
-else:
-    st.write("No distinct resistance levels found.")
+    st.write("**Resistance Levels (BTC/USD):**")
+    st.dataframe(pd.DataFrame({'Level': resistance_levels, 'Cluster Probability': resistance_probs}).style.format({'Level': '${:,.2f}', 'Cluster Probability': '{:.1%}'}))
