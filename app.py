@@ -67,31 +67,34 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
     sim_prices = 70000 + np.cumsum(np.random.normal(0, 500, 168))
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'timestamp': sim_t.astype(np.int64) // 10**6})
 
-# --- DEFINITIVE FIX: Function to visualize the manifold using a gradient background ---
-def visualize_manifold(sigma_data, t_grid, p_domain, history_df):
+# --- DEFINITIVE FIX: Function to visualize the manifold using a gradient line background ---
+def visualize_manifold(sigma_data, t_grid, history_df):
     st.subheader("Visualizing the Market Manifold")
-    st.write("This chart shows the relative volatility over time. Yellow areas are periods of the highest volatility in the dataset, where price movement is 'difficult'. Dark areas are the lowest volatility periods.")
+    st.write("This chart shows the relative volatility over time. Yellow areas are periods of the highest volatility, where price movement is 'difficult'. Dark areas are the lowest volatility periods.")
     
-    # 1. Create a DataFrame with volatility ranks for the gradient.
+    # 1. Create a DataFrame with volatility ranks.
     ranks = rankdata(sigma_data[:len(t_grid)], "average") / len(sigma_data[:len(t_grid)])
     viz_df = pd.DataFrame({'Time': t_grid, 'Rank': ranks})
     
-    # 2. Create the gradient background using mark_area.
-    gradient = alt.Chart(viz_df).mark_area().encode(
-        x='Time:Q',
+    # 2. Create a thick line with a color gradient that will act as the background.
+    gradient_background = alt.Chart(viz_df).mark_line(strokeWidth=300, opacity=0.8).encode( # A very thick line
+        x=alt.X('Time:Q', title="Time (hours)"),
+        y=alt.Y('mean(Rank):Q', axis=None), # Position doesn't matter, we hide the y-axis
         color=alt.Color('Rank:Q',
                         scale=alt.Scale(scheme='viridis'),
                         legend=alt.Legend(title="Volatility Percentile"))
     )
-    
+
     # 3. Create the historical price line chart.
-    line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2.5).encode(
-        x=alt.X('Time:Q', title="Time (hours)"),
-        y=alt.Y('Price:Q', title="Price", scale=alt.Scale(domain=p_domain, zero=False))
+    history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2).encode(
+        x='Time:Q',
+        y=alt.Y('Price:Q', title="Price", scale=alt.Scale(zero=False))
     )
 
-    # 4. Layer the charts together. The gradient will fill the background.
-    final_chart = (gradient + line).properties(
+    # 4. Layer the charts and resolve the scales so they can be independent.
+    final_chart = alt.layer(gradient_background, history_line).resolve_scale(
+        y='independent'
+    ).properties(
         title="Market Manifold Geometry (Colored by Volatility Rank)",
         height=300
     ).interactive()
@@ -213,9 +216,8 @@ with col1:
 
 with col2:
     # DISPLAY THE CORRECTED MANIFOLD VISUALIZATION
-    p_domain = [prices.min(), prices.max()] if N > 0 else [60000, 80000]
     history_df = pd.DataFrame({'Time': times, 'Price': prices})
-    manifold_chart = visualize_manifold(sigma, t, p_domain, history_df)
+    manifold_chart = visualize_manifold(sigma, t, history_df)
     st.altair_chart(manifold_chart, use_container_width=True)
     
     st.write(f"**Expected Final Price:** ${np.mean(final_prices):,.2f}")
