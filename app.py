@@ -38,13 +38,13 @@ def fetch_kraken_data(symbols, timeframe, limit):
         st.warning(f"Failed to load Kraken markets: {e}")
         available_symbols = []
     
-    since = int((time.time() - 7 * 24 * 3600) * 1000)  # Last 7 days
+    since = int((time.time() - 14 * 24 * 3600) * 1000)  # Last 14 days
     st.write(f"Fetching data: since={pd.to_datetime(since, unit='ms')}, limit={limit}, timeframe={timeframe}")
     for symbol in symbols:
         if symbol not in available_symbols:
             st.warning(f"Symbol {symbol} not in Kraken markets")
             continue
-        for attempt in range(10):  # 10 retries
+        for attempt in range(12):  # 12 retries
             try:
                 ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -60,7 +60,7 @@ def fetch_kraken_data(symbols, timeframe, limit):
                 time.sleep(15)  # Increased delay
             except Exception as e:
                 st.warning(f"Error for {symbol} (attempt {attempt+1}): {e}")
-    st.error("Failed to fetch valid data from Kraken after trying all symbols")
+    st.error("Failed to fetch valid data from Kraken after trying all symbols. Check API status or symbols at https://api.kraken.com/0/public/AssetPairs")
     return None
 
 # Parameters
@@ -69,19 +69,25 @@ n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 100, step=50) 
 n_bins = st.sidebar.slider("Number of Bins for Density", 20, 100, 50, step=5)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
 
-symbols = ['BTC/USD']
+symbols = ['BTC/USD', 'XXBTZUSD', 'XBT/USD', 'BTCUSDT', 'BTC-USD', 'XBTUSDT']
 timeframe = '1h'
-limit = 10  # Reduced further
+limit = 10  # Minimal limit
 df = fetch_kraken_data(symbols, timeframe, limit)
 
-if df is None or df.empty or len(df) < 10:
-    st.error("No valid data fetched from Kraken. Check API status or symbols at https://api.kraken.com/0/public/AssetPairs")
+# Validate DataFrame
+if df is None or df.empty or len(df) < 10 or 'timestamp' not in df or 'close' not in df:
+    st.error(f"No valid data fetched from Kraken: df={'None' if df is None else f'len={len(df)}'}")
+    st.stop()
+
+# Validate timestamp and close columns
+if not df['timestamp'].notnull().all() or not df['close'].notnull().all() or not df['close'].gt(0).all():
+    st.error(f"Invalid columns: timestamps_valid={df['timestamp'].notnull().all()}, close_valid={df['close'].notnull().all()}, close_positive={df['close'].gt(0).all()}")
     st.stop()
 
 prices = df['close'].values
 times = (df['timestamp'] - df['timestamp'].iloc[0]) / (1000 * 3600)
 
-# Validate data
+# Validate times and prices
 if len(times) < 2 or not np.all(np.isfinite(times)) or not np.all(np.isfinite(prices)) or not np.all(prices > 0):
     st.error(f"Invalid data: times={len(times)} points, prices={len(prices)} points, times_finite={np.all(np.isfinite(times))}, prices_finite={np.all(np.isfinite(prices))}, prices_positive={np.all(prices > 0)}, times_sample={times[:5] if len(times) > 0 else []}")
     st.stop()
@@ -102,7 +108,7 @@ else:
     st.stop()
 
 p0 = prices[0]
-T = times[-1]
+T = times[-1]  # Safe after validation
 N = len(prices)
 mu = np.mean(returns) * N / T / 100 if len(returns) > 0 else 0.0
 
