@@ -100,8 +100,8 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
                 st.warning(f"Error for {symbol} (attempt {attempt+1}): {e}")
     st.error("Failed to fetch valid data from Kraken. Using simulated data.")
     t = np.linspace(0, 168, 168)
-    p0 = 108000  # Based on web data (~$108,000-$110,150)
-    prices = p0 + np.cumsum(np.random.normal(0, 1000, 168)) * (1 + 0.0156 * t / 168)  # 1.56% weekly gain
+    prices = np.array([df['close'].iloc[0]] * len(t))  # Start with actual initial price, evolve randomly
+    prices = prices + np.cumsum(np.random.normal(0, 1000, 168))  # No hardcoded gain, pure stochastic evolution
     df = pd.DataFrame({"timestamp": (t * 3600 * 1000).astype(int), "close": prices})
     df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
     return df
@@ -152,7 +152,7 @@ if len(returns) > 5:
     except Exception as e:
         st.warning(f"GARCH failed: {e}. Using Heston parameters.")
 
-p0 = prices[0]
+p0 = prices[0]  # Use actual initial price from data
 T = times.iloc[-1]
 N = len(prices)
 mu = np.mean(returns) * N / T if len(returns) > 0 else 0.0
@@ -176,7 +176,8 @@ with st.spinner("Simulating Heston paths..."):
     paths, t, variances = simulate_paths(p0, mu, v0, kappa, theta, xi, rho, sigma, T, N, n_paths)
 
 # 2D Fokker-Planck with finite differences
-nt, np = 400, 800  # High resolution
+nt = 400  # Number of time steps
+np = 800  # Number of price steps
 t_grid = np.linspace(0, T, nt)
 p_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, np)
 dt_fd = T / (nt - 1)
@@ -188,7 +189,7 @@ sigma_init = np.sqrt(v0) * p0
 u[0, :] = np.exp(-((p_grid - p0)**2) / (2 * sigma_init**2))
 u[0, :] /= np.trapz(u[0, :], p_grid)
 
-# Crank-Nicolson scheme for Fokker-Planck
+# Crank-Nicolson scheme with Laplace-Beltrami
 r = dt_fd / (2 * dp**2)
 A = diags([1, -2, 1], [-1, 0, 1], shape=(np, np)).toarray()
 A[0, 0] = A[-1, -1] = 1  # Neumann boundary
@@ -199,8 +200,13 @@ for i in range(nt - 1):
     idx = int(i * (len(sigma) - 1) / (nt - 1))
     sigma_t = max(sigma[idx], 0.01)
     var_t = np.interp(t_grid[i], t, variances.mean(axis=0))
-    b = u[i, :] + 0.5 * dt_fd * (0.5 * var_t * p_grid**2 * np.dot(A, u[i, :]) - mu * p_grid * np.gradient(u[i, :], dp))
-    A_eff = I - r * var_t * p_grid**2
+    metric = AdvancedRiemannianMetric(sigma[:idx+1], t[:i+1], t_grid[i], prices[:i+1], variances[:, :i+1])
+    g = np.array([metric.metric_matrix([t_grid[i], p]) for p in p_grid])
+    det_g = np.array([np.linalg.det(g_k) for g_k in g])
+    g_inv = np.array([np.linalg.inv(g_k) for g_k in g])
+    laplace_term = np.array([np.sum(g_inv[k] * np.gradient(np.gradient(u[i, :], dp), dp)) for k in range(np)])
+    b = u[i, :] + 0.5 * dt_fd * (0.5 * var_t * p_grid**2 * laplace_term - mu * p_grid * np.gradient(u[i, :], dp))
+    A_eff = I - r * var_t * p_grid**2 * np.diag(det_g)
     u[i + 1, :] = spsolve(csr_matrix(A_eff), b)
     u[i + 1, :] = np.clip(u[i + 1, :], 1e-10, 1e10)
     u[i + 1, :] /= np.trapz(u[i + 1, :], p_grid)
