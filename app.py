@@ -7,7 +7,6 @@ from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 from geomstats.geometry.euclidean import Euclidean
-from geomstats.numerics.ivp import ScipySolveIVP
 from geomstats.learning.kmeans import RiemannianKMeans
 import warnings
 import time
@@ -22,7 +21,6 @@ class VolatilityMetric(RiemannianMetric):
         self.sigma = sigma
         self.t = t
         self.T = T
-        self.exp_solver = ScipySolveIVP()
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
