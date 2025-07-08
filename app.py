@@ -63,7 +63,7 @@ n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 200, step=50)
 n_bins = st.sidebar.slider("Number of Bins for Density", 20, 100, 50, step=5)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
 
-symbol = 'BTCUSD'
+symbol = 'BTC/USD'
 timeframe = '1h'
 limit = 500
 df = fetch_kraken_data(symbol, timeframe, limit)
