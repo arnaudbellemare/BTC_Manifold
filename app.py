@@ -16,16 +16,15 @@ import time
 import warnings
 warnings.filterwarnings("ignore")
 
-st.title("BTC/USD Analysis with a Consistent Riemannian Framework")
+st.title("BTC/USD Geometric Analysis with Support & Resistance")
 
-# --- ADAPTATION 1: Use the Advanced, Information-Rich Metric ---
-# This class incorporates GARCH volatility, Heston variance, and Fisher Information.
-# It also includes the crucial compatibility fix to prevent crashes.
+# --- ADVANCED RIEMANNIAN METRIC ---
+# Incorporates GARCH volatility, Heston variance, and Fisher Information.
+# Includes the crucial compatibility fix to prevent crashes.
 class AdvancedRiemannianMetric(RiemannianMetric):
     def __init__(self, sigma, t, T, prices, variances):
-        # Bypass the parent constructor entirely to ensure maximum compatibility.
+        # Bypass the parent constructor entirely for maximum compatibility.
         self.dim = 2
-        
         self.sigma = sigma
         self.t = t
         self.T = T
@@ -38,7 +37,6 @@ class AdvancedRiemannianMetric(RiemannianMetric):
         idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         sigma_val = max(self.sigma[idx], 1e-3)
         var_val = np.interp(t_val, self.t, self.variances.mean(axis=0))
-        # Fisher Information from historical price density
         price_dist, bin_edges = np.histogram(self.prices, bins=50, density=True)
         p_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
         fisher_info = 1.0 / (np.interp(p_val, p_centers, price_dist) + 1e-6)
@@ -63,7 +61,6 @@ class AdvancedRiemannianMetric(RiemannianMetric):
         return christoffels
     
     def log(self, point, base_point):
-        # Solves for the tangent vector (velocity) that connects two points.
         point = np.asarray(point)
         base_point = np.asarray(base_point)
         def objective(velocity):
@@ -74,8 +71,7 @@ class AdvancedRiemannianMetric(RiemannianMetric):
         sol = root(objective, initial_guess, method='hybr', tol=1e-5)
         if not sol.success: return point - base_point
         return sol.x
-
-# Data fetching function (from simpler script, it's robust)
+        
 @st.cache_data
 def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
     exchange = ccxt.kraken()
@@ -90,7 +86,7 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
             df = df[(df['datetime'] >= start_date) & (df['datetime'] <= end_date)].dropna()
             if len(df) >= 10: return df
         except Exception: continue
-    st.error("Failed to fetch valid data. Using simulated data.")
+    st.error("Failed to fetch valid data for July 1-7, 2025. Using simulated data.")
     sim_t = pd.date_range(start=start_date, periods=168, freq='h')
     sim_prices = 70000 + np.cumsum(np.random.normal(0, 500, 168))
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'timestamp': sim_t.astype(np.int64) // 10**6})
@@ -117,7 +113,7 @@ if len(returns) > 5:
         sigma = np.concatenate(([garch.conditional_volatility[0]], garch.conditional_volatility)) / 100
     except Exception: st.warning("GARCH failed. Using default volatility.")
 
-# --- ADAPTATION 2: Use the more realistic Heston model for simulation ---
+# Heston Model Simulation
 kappa, theta, xi, rho = 0.1, v0, 0.1, -0.3
 def simulate_paths_heston(p0, mu, v0, kappa, theta, xi, rho, T, N, n_paths):
     if N == 0: return np.array([[p0]]), np.array([0]), np.array([[v0]])
@@ -135,35 +131,29 @@ def simulate_paths_heston(p0, mu, v0, kappa, theta, xi, rho, T, N, n_paths):
 with st.spinner("Simulating Heston paths..."):
     paths, t, variances = simulate_paths_heston(p0, mu / (365*24), v0, kappa, theta, xi, rho, T, N, n_paths)
 
-# --- ADAPTATION 3: Solve Fokker-Planck ON THE MANIFOLD using the Laplace-Beltrami Operator ---
+# Fokker-Planck on the Manifold using Laplace-Beltrami Operator
 nt, n_p_steps = 200, 400
 t_grid = np.linspace(0, T, nt)
 p_grid = np.linspace(paths.min() * 0.9, paths.max() * 1.1, n_p_steps)
 dt_fd, dp = (t_grid[1] - t_grid[0]), (p_grid[1] - p_grid[0])
-
 u = np.zeros((nt, n_p_steps))
 sigma_init = np.sqrt(v0) * p0 if v0 > 0 else np.std(prices[:10] if len(prices) > 10 else [100])
 u[0, :] = np.exp(-((p_grid - p0)**2) / (2 * max(sigma_init**2, 1e-4)))
 u[0, :] /= np.trapz(u[0, :], p_grid)
-
 I = diags([1], [0], shape=(n_p_steps, n_p_steps), format="csr")
 D_fwd = (1 / dp) * diags([-1, 1], [0, 1], shape=(n_p_steps, n_p_steps), format="csr")
 D_bwd = (1 / dp) * diags([-1, 1], [-1, 0], shape=(n_p_steps, n_p_steps), format="csr")
-
 metric_fp = AdvancedRiemannianMetric(sigma, t, T, prices, variances)
-
 with st.spinner("Solving Fokker-Planck on the manifold..."):
     for i in range(nt - 1):
         current_time = t_grid[i]
         g_p = np.array([metric_fp.metric_matrix([current_time, p]) for p in p_grid])
         g_inv_pp = 1 / g_p[:, 1, 1]
         sqrt_det_g = np.sqrt(g_p[:, 1, 1])
-        # This is the Laplace-Beltrami operator, which respects the geometry
         L_LB_op = D_bwd @ diags(sqrt_det_g * g_inv_pp) @ D_fwd
         L_drift_op = diags((mu / (365*24)) * p_grid) @ D_fwd
-        L_LB_op.setdiag(0, k=0); L_LB_op.setdiag(0, k=-1) # Boundary conditions
+        L_LB_op.setdiag(0, k=0); L_LB_op.setdiag(0, k=-1)
         L_drift_op.setdiag(0, k=0); L_drift_op.setdiag(0, k=-1)
-
         L = 0.5 * diags(p_grid**2) @ L_LB_op + L_drift_op
         LHS = I - 0.5 * dt_fd * L
         RHS = (I + 0.5 * dt_fd * L) @ u[i, :]
@@ -172,17 +162,47 @@ with st.spinner("Solving Fokker-Planck on the manifold..."):
         norm = np.trapz(u[i + 1, :], p_grid)
         if norm > 1e-9: u[i + 1, :] /= norm
 
-# --- ADAPTATION 4: Identify Stable Levels (Attractors) using Effective Potential ---
+# --- FIX: Classify Stable Levels and Calculate Separate Probabilities ---
 u_density = u[-1, :]
+# 1. Find all stable level candidates from the potential function
 V_eff = -np.log(u_density + 1e-20)
 V_eff -= V_eff.min()
 potential_minima_idx, _ = find_peaks(-V_eff, distance=int(n_p_steps/20), height=-np.log(0.8))
 stable_levels = p_grid[potential_minima_idx]
 
+# 2. Classify levels into Support and Resistance
+expected_price = np.trapz(p_grid * u_density, p_grid)
+support_levels = [level for level in stable_levels if level < expected_price]
+resistance_levels = [level for level in stable_levels if level > expected_price]
+
+# 3. Calculate Hit Probabilities for each category
+final_std_dev = np.sqrt(np.trapz((p_grid - expected_price)**2 * u_density, p_grid))
+epsilon = 0.25 * final_std_dev  # Dynamic epsilon based on final volatility
+
+support_probs, resistance_probs = [], []
+total_support_prob, total_resistance_prob = 0, 0
+
+for s_level in support_levels:
+    mask = (p_grid >= s_level - epsilon) & (p_grid <= s_level + epsilon)
+    prob = np.trapz(u_density[mask], p_grid[mask])
+    support_probs.append(prob)
+    total_support_prob += prob
+for r_level in resistance_levels:
+    mask = (p_grid >= r_level - epsilon) & (p_grid <= r_level + epsilon)
+    prob = np.trapz(u_density[mask], p_grid[mask])
+    resistance_probs.append(prob)
+    total_resistance_prob += prob
+
+# 4. Normalize probabilities within each category
+if total_support_prob > 0:
+    support_probs = [p / total_support_prob for p in support_probs]
+if total_resistance_prob > 0:
+    resistance_probs = [p / total_resistance_prob for p in resistance_probs]
+
 # Geodesic Calculation
 metric = AdvancedRiemannianMetric(sigma, t, T, prices, variances)
 def geodesic_equation(s, y):
-    pos = y[:2]; vel = y[2:]
+    pos, vel = y[:2], y[2:]
     gamma = metric.christoffel_symbols(pos)
     accel = -np.einsum('ijk,j,k->i', gamma, vel, vel)
     return np.concatenate([vel, accel])
@@ -197,19 +217,25 @@ except Exception as e:
     st.error(f"Geodesic computation failed: {e}. Using linear approximation.")
     geodesic_df = pd.DataFrame({"Time": t, "Price": p0 + initial_velocity[1] * t, "Path": "Geodesic"})
 
-# Visualization
+# --- FIX: Visualization with Separate Support/Resistance Colors ---
 path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} for i in range(min(n_paths, n_display_paths)) for j in range(N)]
 plot_df = pd.concat([pd.DataFrame(path_data), geodesic_df])
-stable_levels_df = pd.DataFrame({"Price": stable_levels})
+support_df = pd.DataFrame({"Price": support_levels})
+resistance_df = pd.DataFrame({"Price": resistance_levels})
 
 base = alt.Chart(plot_df).encode(x=alt.X("Time:Q", title="Time (hours)"), y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False)))
 path_lines = base.mark_line(opacity=0.1).encode(color=alt.value('gray'), detail='Path:N').transform_filter(alt.datum.Path != "Geodesic")
 geodesic_line = base.mark_line(strokeWidth=3).encode(color=alt.value('red')).transform_filter(alt.datum.Path == "Geodesic")
-level_lines = alt.Chart(stable_levels_df).mark_rule(stroke="blue", strokeWidth=1.5, strokeDash=[6, 3]).encode(y="Price:Q")
+support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5, strokeDash=[6, 3]).encode(y="Price:Q")
+resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5, strokeDash=[6, 3]).encode(y="Price:Q")
 
-chart = (path_lines + geodesic_line + level_lines).properties(
-    title="Price Dynamics on a Geometric Market Manifold", width=800, height=500
+chart = (path_lines + geodesic_line + support_lines + resistance_lines).properties(
+    title="Price Dynamics, Geodesic, Support (Green), and Resistance (Red)", width=800, height=500
 ).interactive()
 
 st.altair_chart(chart, use_container_width=True)
-st.write(f"**Stable Price Levels (Attractors):** {[f'${x:,.2f}' for x in stable_levels]}")
+st.write(f"**Expected Final Price:** ${expected_price:,.2f}")
+st.write("**Support Levels (BTC/USD):**")
+st.dataframe(pd.DataFrame({'Level': support_levels, 'Hit Probability': support_probs}).style.format({'Level': '${:,.2f}', 'Hit Probability': '{:.1%}'}))
+st.write("**Resistance Levels (BTC/USD):**")
+st.dataframe(pd.DataFrame({'Level': resistance_levels, 'Hit Probability': resistance_probs}).style.format({'Level': '${:,.2f}', 'Hit Probability': '{:.1%}'}))
