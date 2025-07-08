@@ -7,9 +7,8 @@ from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 from geomstats.geometry.euclidean import Euclidean
-import warnings
 import time
-warnings.filterwarnings("ignore")
+
 
 st.title("BTC/USD Price Analysis on Riemannian Manifold")
 
