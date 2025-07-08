@@ -166,19 +166,27 @@ with st.spinner("Solving Fokker-Planck on the manifold..."):
         norm = np.trapz(u[i + 1, :], p_grid)
         if norm > 1e-9: u[i + 1, :] /= norm
 
-# --- K-MEANS CLUSTERING FOR SUPPORT & RESISTANCE ---
+# --- K-MEANS CLUSTERING WITH ROBUST SAMPLING ---
 u_density = u[-1, :]
 expected_price = np.trapz(p_grid * u_density, p_grid)
 
-# 1. Sample from the final probability distribution
-n_samples = 10000
-sampled_prices = np.random.choice(p_grid, size=n_samples, p=u_density)
+# --- FIX: Re-normalize the density so its SUM is 1 for np.random.choice ---
+# 1. Check if the density is valid to prevent division by zero or NaN.
+density_sum = np.sum(u_density)
+if not np.isfinite(density_sum) or density_sum < 1e-9:
+    st.warning("Final probability density is unstable. Using uniform distribution for clustering.")
+    probabilities = np.ones_like(p_grid) / len(p_grid) # Fallback to uniform
+else:
+    # 2. Normalize so the sum is exactly 1.
+    probabilities = u_density / density_sum
 
-# 2. Run K-Means to find cluster centers
+# 3. Sample using the correctly normalized probabilities.
+n_samples = 10000
+sampled_prices = np.random.choice(p_grid, size=n_samples, p=probabilities)
 kmeans = KMeans(n_clusters=k_clusters, random_state=42, n_init='auto').fit(sampled_prices.reshape(-1, 1))
 cluster_centers = sorted(kmeans.cluster_centers_.flatten())
 
-# 3. Classify centers and calculate probabilities based on cluster population
+# 4. Classify centers and calculate probabilities based on cluster population
 support_levels, resistance_levels = [], []
 support_probs, resistance_probs = [], []
 labels = kmeans.labels_
