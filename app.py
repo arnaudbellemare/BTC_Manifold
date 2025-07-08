@@ -7,7 +7,9 @@ from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 # Add this line with your other imports
-from geomstats.geometry.euclidean import Euclidean
+# Add this with your other imports
+from geomstats.numerics.geodesic import ScipySolveIVP
+from geomstats.geometry.euclidean import Euclidean # You should already have this from the last fix
 import warnings
 import time
 warnings.filterwarnings("ignore")
@@ -21,6 +23,11 @@ class VolatilityMetric(RiemannianMetric):
         space = Euclidean(dim=2)
         # 2. Pass the MANIFOLD OBJECT to the parent class constructor
         super().__init__(space=space)
+        
+        # 3. NEW: Instantiate a numerical solver and assign it to self.exp_solver
+        # This tells geomstats HOW to compute the geodesic for this custom metric.
+        self.exp_solver = ScipySolveIVP(space)
+        
         self.sigma = sigma
         self.t = t
         self.T = T
@@ -32,7 +39,9 @@ class VolatilityMetric(RiemannianMetric):
         if self.T == 0:
             idx = 0
         else:
-            idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
+            # Clip the time value to be within the valid range [0, T] before calculating index
+            t_val_clipped = np.clip(t_val, 0, self.T)
+            idx = int(t_val_clipped / self.T * (len(self.sigma) - 1))
             
         return np.diag([1.0, self.sigma[idx]**2])
 # Fetch Kraken data
