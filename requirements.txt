@@ -12,4 +12,3 @@ mpi4py
 plotly
 numba
 joblib 
-streamlit-components
