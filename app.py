@@ -19,37 +19,49 @@ warnings.filterwarnings("ignore")
 
 st.title("BTC/USD Advanced Riemannian Manifold Analysis (July 1-7, 2025)")
 
-# Advanced Riemannian metric with volatility and Fisher information
+# Advanced Riemannian metric with volatility, correlation, and Fisher information
 class AdvancedRiemannianMetric(RiemannianMetric):
-    def __init__(self, sigma, t, T, prices):
+    def __init__(self, sigma, t, T, prices, variances):
         super().__init__(space=Euclidean(dim=2))
         self.sigma = sigma
         self.t = t
         self.T = T
         self.prices = prices
+        self.variances = variances
         self.exp_solver = ExpODESolver(space=Euclidean(dim=2), integrator=ScipySolveIVP())
+        self.fisher_cache = {}
 
     def metric_matrix(self, base_point):
         t_val, p_val = base_point
         idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         sigma_val = max(self.sigma[idx], 0.01)
-        # Fisher information term from price distribution
+        var_val = np.interp(t_val, self.t, self.variances.mean(axis=0))
+        # Fisher information from price distribution
         price_dist = np.histogram(self.prices, bins=50, density=True)[0]
         fisher_info = 1.0 / (np.interp(p_val, np.linspace(min(self.prices), max(self.prices), 50), price_dist) + 1e-6)
-        return np.diag([1.0, sigma_val**2 * fisher_info])
+        return np.diag([1.0, (sigma_val**2 * var_val + fisher_info)])
 
     def christoffel_symbols(self, base_point):
         t_val, p_val = base_point
         idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         sigma_val = max(self.sigma[idx], 0.01)
+        d_sigma = np.gradient(self.sigma, self.t / self.T * (len(self.sigma) - 1))[idx] / (self.T / len(self.sigma)) if idx > 0 and idx < len(self.sigma) - 1 else 0.0
         g = self.metric_matrix(base_point)
         g_inv = np.linalg.inv(g)
-        d_sigma = np.gradient(self.sigma, self.t / self.T * (len(self.sigma) - 1))[idx] / (self.T / len(self.sigma))
         gamma = np.zeros((2, 2, 2))
         gamma[1, 1, 0] = 0.5 * g_inv[0, 0] * d_sigma * p_val / sigma_val
         gamma[1, 0, 1] = gamma[1, 1, 0]
         gamma[0, 1, 1] = gamma[1, 1, 0]
         return gamma
+
+    def ricci_curvature(self, base_point):
+        # Approximate Ricci curvature (simplified 2D case)
+        gamma = self.christoffel_symbols(base_point)
+        g = self.metric_matrix(base_point)
+        g_inv = np.linalg.inv(g)
+        R = np.zeros((2, 2))
+        R[1, 1] = np.sum([g_inv[i, j] * (gamma[i, 1, 1] - gamma[i, 1, 0]) for i in range(2) for j in range(2)])
+        return R
 
 # Fetch Kraken data
 @st.cache_data
@@ -98,9 +110,9 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
 
 # Parameters
 st.sidebar.header("Parameters")
-n_paths = st.sidebar.slider("Number of Simulated Paths", 500, 2000, 1000, step=100)
-n_display_paths = st.sidebar.slider("Number of Paths to Display", 20, 100, 50, step=10)
-epsilon = st.sidebar.slider("Probability Integration Range ($)", 500, 5000, 2000, step=500)
+n_paths = st.sidebar.slider("Number of Simulated Paths", 1000, 5000, 2000, step=500)
+n_display_paths = st.sidebar.slider("Number of Paths to Display", 50, 200, 100, step=25)
+epsilon = st.sidebar.slider("Probability Integration Range ($)", 1000, 10000, 5000, step=1000)
 
 # Fetch data
 symbols = ['XBT/USD', 'BTC/USD', 'BTCUSDT', 'XBTUSDT']
@@ -162,49 +174,54 @@ def simulate_paths(p0, mu, v0, kappa, theta, xi, rho, sigma, T, N, n_paths):
         paths[:, j] = paths[:, j-1] + mu * paths[:, j-1] * dt + np.sqrt(variances[:, j-1]) * paths[:, j-1] * z1
     return paths, t, variances
 
-with st.spinner("Simulating paths with Heston model..."):
+with st.spinner("Simulating Heston paths..."):
     paths, t, variances = simulate_paths(p0, mu, v0, kappa, theta, xi, rho, sigma, T, N, n_paths)
 
 # 2D Fokker-Planck on manifold with FEniCS
 msh = mesh.create_rectangle(MPI.COMM_WORLD, [np.array([0.0, min(prices) * 0.95]), np.array([T, max(prices) * 1.05])],
-                           [100, 200], cell_type=mesh.CellType.triangle)
-V = fem.FunctionSpace(msh, ("CG", 2))
+                           [200, 400], cell_type=mesh.CellType.triangle)
+V = fem.FunctionSpace(msh, ("CG", 3))  # Cubic elements for higher accuracy
 u = function.Function(V)
-v = function.Function(V)
 
-# Variational form
+# Variational form with Laplace-Beltrami
 t_var = ufl.TrialFunction(V)
 v_test = ufl.TestFunction(V)
+x = ufl.SpatialCoordinate(msh)
+t, p = x[0], x[1]
+
 metric = AdvancedRiemannianMetric(sigma, t, T, prices)
-g = lambda x: metric.metric_matrix([x[0], x[1]])
-det_g = ufl.det(ufl.as_matrix([[g(x)[0,0], g(x)[0,1]], [g(x)[1,0], g(x)[1,1]]]))
-g_inv = ufl.inv(ufl.as_matrix([[g(x)[0,0], g(x)[0,1]], [g(x)[1,0], g(x)[1,1]])))
+g = ufl.as_matrix([[metric.metric_matrix([t, p])[0, 0], metric.metric_matrix([t, p])[0, 1]],
+                   [metric.metric_matrix([t, p])[1, 0], metric.metric_matrix([t, p])[1, 1]]])
+g_inv = ufl.inv(g)
+det_g = ufl.det(g)
 
-# Laplace-Beltrami operator
-def laplace_beltrami(u, g_inv):
-    return ufl.div(ufl.dot(g_inv, ufl.grad(u)))
+def laplace_beltrami(u, g_inv, det_g):
+    return ufl.div(ufl.dot(g_inv, ufl.grad(u)) * ufl.sqrt(det_g)) / ufl.sqrt(det_g)
 
-# Fokker-Planck variational form
-a = ufl.inner(laplace_beltrami(t_var, g_inv), v_test) * ufl.dx
-L = ufl.inner(u + 0.5 * (v * p0**2 * laplace_beltrami(u, g_inv) - mu * p0 * ufl.grad(u)[1] +
-         xi**2 * v * laplace_beltrami(v, g_inv) - kappa * (theta - v) * ufl.grad(v)[1]), v_test) * ufl.dx
+F = (u * v_test * dx + 0.5 * dt * (laplace_beltrami(t_var, g_inv, det_g) * v * p**2 * u +
+                                   laplace_beltrami(t_var, g_inv, det_g) * xi**2 * v * u -
+                                   ufl.dot(ufl.grad(t_var), mu * p * ufl.grad(v_test)) -
+                                   ufl.dot(ufl.grad(t_var), kappa * (theta - v) * ufl.grad(v_test)[1])) * dx)
 
 # Initial condition
 def initial_condition(x):
     values = np.zeros(x.shape[1])
-    values[:] = np.exp(-((x[1] - p0)**2) / (2 * v0 * p0**2)) * np.exp(-((x[0] - 0)**2) / (2 * T**2))
+    sigma_init = np.sqrt(v0) * p0
+    values[:] = np.exp(-((x[1] - p0)**2) / (2 * sigma_init**2)) * np.exp(-((x[0] - 0)**2) / (2 * T**2))
     return values
 u.interpolate(initial_condition)
 
-# Time-stepping
-dt_fem = T / 2000
+# Time-stepping with adaptive solver
+dt_fem = T / 4000
 t_fem = 0.0
-for i in range(2000):
+for i in range(4000):
     t_fem += dt_fem
-    problem = fem.LinearProblem(a, L, bcs=[])
+    problem = fem.LinearProblem(F, u, bcs=[])
     u = problem.solve()
     # Update variance (approximate)
-    v.vector.set_local(np.clip(v.vector.get_local() + kappa * (theta - v.vector.get_local()) * dt_fem, 1e-6, np.inf))
+    v_vec = np.clip(variances.mean(axis=0) + kappa * (theta - variances.mean(axis=0)) * dt_fem, 1e-6, np.inf)
+    v = function.Function(V)
+    v.interpolate(lambda x: np.interp(x[0], t, v_vec))
 
 # Extract 1D density
 u_vec = u.vector.get_local()
@@ -214,24 +231,25 @@ u_density = np.zeros(len(price_coords))
 for i, p in enumerate(price_coords):
     u_density[i] = np.mean(u_vec[np.where(np.isclose(coords[:, 1], p))[0]])
 
-# Identify support and resistance
+# Identify support and resistance with curvature
 du = np.gradient(u_density, price_coords[1] - price_coords[0])
 d2u = np.gradient(du, price_coords[1] - price_coords[0])
-support_idx = np.where((du > 0) & (d2u < 0) & (u_density > 0.1 * u_density.max()))[0]
-resistance_idx = np.where((du < 0) & (d2u > 0) & (u_density > 0.1 * u_density.max()))[0]
+ricci = metric.ricci_curvature(np.array([T, price_coords]))
+support_idx = np.where((du > 0) & (d2u < 0) & (u_density > 0.1 * u_density.max()) & (ricci[1, 1] < 0))[0]
+resistance_idx = np.where((du < 0) & (d2u > 0) & (u_density > 0.1 * u_density.max()) & (ricci[1, 1] > 0))[0]
 support_levels = price_coords[support_idx]
 resistance_levels = price_coords[resistance_idx]
 if len(support_levels) == 0 or len(resistance_levels) == 0:
-    peaks, _ = find_peaks(u_density, height=0.1 * u_density.max(), distance=5)
+    st.warning("Insufficient distinct levels. Using density peaks with curvature fallback.")
+    peaks, _ = find_peaks(u_density, height=0.1 * u_density.max(), distance=10)
     levels = price_coords[peaks]
-    support_levels = levels[levels < np.median(levels)]
-    resistance_levels = levels[levels > np.median(levels)]
+    support_levels = levels[(du[peaks] > 0) & (ricci[1, 1][peaks] < 0)]
+    resistance_levels = levels[(du[peaks] < 0) & (ricci[1, 1][peaks] > 0)]
 
 # Heat kernel and probabilities
 def heat_kernel(t, x, y, metric):
-    # Approximate heat kernel using Laplace-Beltrami (simplified for 1D projection)
     dist = metric.dist(x, y)
-    return (4 * np.pi * t)**(-0.5) * np.exp(-dist**2 / (4 * t))
+    return (4 * np.pi * t)**(-1.0) * np.exp(-dist**2 / (4 * t))
 
 support_probs = []
 resistance_probs = []
@@ -242,7 +260,10 @@ for sr in support_levels:
     prob = 0.0
     for p in price_coords:
         if abs(p - sr) <= epsilon:
-            prob += heat_kernel(T, [0, p0], [T, p], metric) * np.sqrt(np.linalg.det(metric.metric_matrix([T, p]))) * dp
+            kernel = heat_kernel(T, [0, p0], [T, p], metric)
+            det_g = np.linalg.det(metric.metric_matrix([T, p]))
+            if det_g > 0:
+                prob += kernel * np.sqrt(det_g) * (price_coords[1] - price_coords[0])
     support_probs.append(prob)
     total_support_prob += prob
 
@@ -250,7 +271,10 @@ for rr in resistance_levels:
     prob = 0.0
     for p in price_coords:
         if abs(p - rr) <= epsilon:
-            prob += heat_kernel(T, [0, p0], [T, p], metric) * np.sqrt(np.linalg.det(metric.metric_matrix([T, p]))) * dp
+            kernel = heat_kernel(T, [0, p0], [T, p], metric)
+            det_g = np.linalg.det(metric.metric_matrix([T, p]))
+            if det_g > 0:
+                prob += kernel * np.sqrt(det_g) * (price_coords[1] - price_coords[0])
     resistance_probs.append(prob)
     total_resistance_prob += prob
 
@@ -259,36 +283,42 @@ support_probs = [p / total_support_prob if total_support_prob > 0 else 1.0 / len
 resistance_probs = [p / total_resistance_prob if total_resistance_prob > 0 else 1.0 / len(resistance_levels) for p in resistance_probs]
 
 # Geodesic with curvature
+def geodesic_equation(t, y, metric):
+    pos = y[:2]
+    vel = y[2:]
+    gamma = metric.christoffel_symbols(pos)
+    accel = -np.einsum('ijk,vk->vj', gamma, np.outer(vel, vel))
+    return np.concatenate([vel, accel.flatten()])
+
 try:
-    metric = AdvancedRiemannianMetric(sigma, t, T, prices)
     initial_point = np.array([0.0, p0])
-    end_point = np.array([T, prices[-1]])
-    geodesic = metric.geodesic(initial_point=initial_point, end_point=end_point)
-    geodesic_points = geodesic(np.linspace(0, 1, N))
+    delta_p = prices[-1] - prices[0]
+    initial_tangent = np.array([T / N, delta_p / N, 0.0, 0.0])  # Normalized initial velocity
+    sol = solve_ivp(geodesic_equation, [0, 1], np.concatenate([initial_point, initial_tangent[2:]]),
+                    args=(metric,), method='RK45', t_eval=np.linspace(0, 1, N), rtol=1e-6, atol=1e-8)
+    geodesic_points = np.vstack([t * sol.y[0, :], initial_point[1] + sol.y[1, :] * T]).T
     geodesic_df = pd.DataFrame({
         "Time": geodesic_points[:, 0],
         "Price": geodesic_points[:, 1],
         "Path": "Geodesic"
     })
-
-    # Geodesic distance for trending/reversion
-    distances = []
-    for i in range(n_paths):
-        path_points = np.vstack([t, paths[i]]).T
-        dist = metric.dist(path_points, geodesic_points)
-        distances.append(np.mean(dist))
-    trending = np.array(distances) < np.percentile(distances, 25)
-    reversion = np.array(distances) > np.percentile(distances, 75)
 except Exception as e:
     st.error(f"Geodesic computation failed: {e}. Using linear approximation.")
     geodesic_df = pd.DataFrame({
         "Time": t,
-        "Price": p0 + (prices[-1] - p0) / T * t,
+        "Price": p0 + (delta_p / T) * t,
         "Path": "Geodesic"
     })
-    distances = [np.mean(np.abs(paths[i] - (p0 + (prices[-1] - p0) / T * t))) for i in range(n_paths)]
-    trending = np.array(distances) < np.percentile(distances, 25)
-    reversion = np.array(distances) > np.percentile(distances, 75)
+
+# Trending/Reversion analysis
+def geodesic_distance(metric, path, geodesic):
+    return np.mean([metric.dist(np.array([t[i], path[i]]), np.array([geodesic["Time"].iloc[i], geodesic["Price"].iloc[i]])) for i in range(N)])
+
+distances = [geodesic_distance(metric, paths[i], geodesic_df) for i in range(n_paths)]
+trending_threshold = np.percentile(distances, 25)
+reversion_threshold = np.percentile(distances, 75)
+trending_paths = np.sum(np.array(distances) < trending_threshold)
+reversion_paths = np.sum(np.array(distances) > reversion_threshold)
 
 # Prepare data for Altair
 path_data = []
@@ -297,6 +327,7 @@ for i in range(min(n_paths, n_display_paths)):
         path_data.append({"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"})
 path_df = pd.DataFrame(path_data)
 plot_df = pd.concat([path_df, geodesic_df])
+
 support_df = pd.DataFrame({"Price": support_levels, "Level": [f"Support_{i}" for i in range(len(support_levels))]})
 resistance_df = pd.DataFrame({"Price": resistance_levels, "Level": [f"Resistance_{i}" for i in range(len(resistance_levels))]})
 
@@ -304,7 +335,7 @@ resistance_df = pd.DataFrame({"Price": resistance_levels, "Level": [f"Resistance
 base = alt.Chart(plot_df).encode(
     x=alt.X("Time:Q", title="Time (hours)", scale=alt.Scale(domain=[0, T])),
     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(domain=[min(plot_df["Price"]) * 0.95, max(plot_df["Price"]) * 1.05])),
-    color=alt.Color("Path:N", legend=alt.Legend(title="Paths"))
+    color=alt.Color("Path:N", legend=alt.Legend(title="Path Type", orient="bottom"))
 )
 
 paths = base.mark_line(opacity=0.1).transform_filter(
@@ -316,23 +347,23 @@ geodesic = base.mark_line(strokeWidth=3, color="red").transform_filter(
 )
 
 support_lines = alt.Chart(support_df).mark_rule(
-    strokeDash=[5, 5], color="green", strokeWidth=2
+    stroke="green", strokeWidth=2, strokeDash=[5, 5]
 ).encode(
     y="Price:Q",
-    tooltip=["Price", "Level"]
-)
+    tooltip=["Price:Q", alt.value("Support Level")]
+).interactive()
 
 resistance_lines = alt.Chart(resistance_df).mark_rule(
-    strokeDash=[5, 5], color="red", strokeWidth=2
+    stroke="red", strokeWidth=2, strokeDash=[5, 5]
 ).encode(
     y="Price:Q",
-    tooltip=["Price", "Level"]
-)
+    tooltip=["Price:Q", alt.value("Resistance Level")]
+).interactive()
 
 chart = (paths + geodesic + support_lines + resistance_lines).properties(
     title="BTC/USD Price Paths, Geodesic, Support, and Resistance Levels",
-    width=1000,
-    height=600
+    width=1200,
+    height=800
 ).interactive()
 
 st.altair_chart(chart, use_container_width=True)
@@ -340,5 +371,28 @@ st.write("**Support Levels (BTC/USD):**", support_levels)
 st.write("**Support Hit Probabilities:**", dict(zip(support_levels, support_probs)))
 st.write("**Resistance Levels (BTC/USD):**", resistance_levels)
 st.write("**Resistance Hit Probabilities:**", dict(zip(resistance_levels, resistance_probs)))
-st.write(f"**Trending Paths:** {np.sum(trending)} (Distance < {np.percentile(distances, 25):.2f})")
-st.write(f"**Reversion Paths:** {np.sum(reversion)} (Distance > {np.percentile(distances, 75):.2f})")
+st.write(f"**Trending Paths:** {trending_paths} (Distance < {trending_threshold:.2f})")
+st.write(f"**Reversion Paths:** {reversion_paths} (Distance > {reversion_threshold:.2f})")
+
+# MATLAB validation script (to be run separately)
+matlab_script = """
+syms t p
+sigma = @(t) interp1(t_data, sigma_data, t); % Replace with Python data
+fisher = @(p) 1 ./ (hist(p_data, 50) + 1e-6); % Replace with Python data
+g11 = 1;
+g22 = sigma(t)^2 + fisher(p);
+g = [g11 0; 0 g22];
+g_inv = inv(g);
+christoffel = sym(zeros(2,2,2));
+christoffel(2,2,1) = diff(sigma(t), t) * p / (2 * sigma(t));
+% Compute geodesic equation and curvature (requires Symbolic Math Toolbox)
+gamma_dot = [diff(p,t) diff(t,t)];
+geodesic_eq = christoffel .* gamma_dot * gamma_dot';
+ricci = simplify(diff(g_inv, t) - christoffel * christoffel');
+disp('Metric:'); disp(g);
+disp('Christoffel Symbols:'); disp(christoffel);
+disp('Ricci Curvature:'); disp(ricci);
+% Plot geodesic (numerical solution needed with data)
+"""
+st.write("**MATLAB Validation Script:**")
+st.code(matlab_script, language="matlab")
