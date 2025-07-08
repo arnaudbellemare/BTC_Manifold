@@ -6,11 +6,11 @@ import altair as alt
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 import geomstats.geometry.euclidean
-from geomstats.numerics.ivp import ScipySolveIVP
 from scipy.interpolate import interp1d
 from scipy.stats import gaussian_kde
 from scipy.sparse.linalg import eigs
 from joblib import Parallel, delayed
+from numba import jit
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -19,6 +19,10 @@ st.title("BTC/USD Price Analysis on a Volatility-Weighted Manifold")
 st.write("""
 This application models the Bitcoin market as a 2D geometric space (manifold) of (Time, Log-Price).
 The geometry is warped by GARCH volatility, with geodesics indicating trending/mean-reverting paths and critical levels derived geometrically.
+- **High Volatility (Yellow areas):** Manifold is 'stretched,' indicating high risk.
+- **Low Volatility (Dark areas):** Manifold is 'flat,' indicating calmer markets.
+- **Geodesic (Red Line):** Straightest path through the manifold, showing idealized price movement.
+- **S/R Grid:** Green (support) and red (resistance) lines show probable price levels.
 """)
 
 # --- Geometric Modeling Class ---
@@ -93,28 +97,42 @@ def compute_geodesic(metric, t, p0, pT, T):
     points = geodesic(np.linspace(0, 1, len(t)))
     return pd.DataFrame({"Time": points[:, 0], "Price": points[:, 1], "Path": "Geodesic"})
 
-def simulate_paths_manifold(metric, p0, T, N, n_paths):
-    dt = T / (N - 1)
+@jit(nopython=True)
+def compute_single_path(p0, T, N, dt, drift, diffusion, rng_seed):
+    np.random.seed(rng_seed)
+    path = np.zeros((N, 2))
+    path[0, :] = [0.0, p0]
+    for j in range(N - 1):
+        pos = path[j, :]
+        dW = np.random.normal(0, np.sqrt(dt))
+        stoch_term = np.array([0.0, diffusion[j] * dW])
+        path[j + 1, :] = pos + drift[j] * dt + stoch_term
+    return path[:, 1]
+
+def simulate_paths_manifold(metric, p0, T, N, n_paths, subsample_factor=0.2):
+    N_coarse = max(int(N * subsample_factor), 50)
+    dt = T / (N_coarse - 1)
+    t_coarse = np.linspace(0, T, N_coarse)
+    
+    sigma = np.array([metric.sigma_interp(ti) for ti in t_coarse])
+    mu = np.array([metric.mu_interp(ti) for ti in t_coarse])
+    det = 1.0 * sigma**2 - mu**2
+    det = np.maximum(det, 1e-6)
+    g_inv_22 = 1.0 / det
+    drift = np.vstack([np.ones(N_coarse), mu]).T
+    diffusion = np.sqrt(g_inv_22)
+    
+    paths_coarse = np.array(Parallel(n_jobs=-1)(
+        delayed(compute_single_path)(p0, T, N_coarse, dt, drift, diffusion, i)
+        for i in range(n_paths)
+    ))
+    
     t = np.linspace(0, T, N)
     paths = np.zeros((n_paths, N))
-    paths[:, 0] = p0
-
-    def sde(t, pos, metric):
-        g_inv = np.linalg.inv(metric.metric_matrix(pos))
-        drift = np.array([1.0, metric.mu_interp(t)])  # Time advances, price follows mu
-        diffusion = np.sqrt(g_inv[1, 1])  # Volatility from metric
-        return drift, diffusion
-
     for i in range(n_paths):
-        path = np.zeros((N, 2))  # Store [t, p] for each time step
-        path[0, :] = [0.0, p0]
-        for j in range(N - 1):
-            pos = path[j, :]
-            drift, diffusion = sde(t[j], pos, metric)
-            dW = np.random.normal(0, np.sqrt(dt))
-            stoch_term = np.array([0.0, diffusion * dW])
-            path[j + 1, :] = pos + drift * dt + stoch_term
-        paths[i, :] = path[:, 1]  # Extract price coordinate
+        interp = interp1d(t_coarse, paths_coarse[i], bounds_error=False, fill_value="extrapolate")
+        paths[i, :] = interp(t)
+    
     return paths, t
 
 def compute_critical_levels(metric, t_grid, p_grid, n_levels=4):
@@ -160,11 +178,12 @@ def visualize_manifold(metric, t_grid, p_grid):
 # --- Main Application ---
 st.sidebar.header("Model Parameters")
 days_history = st.sidebar.slider("Historical Data (Days)", 7, 90, 30)
-n_paths = st.sidebar.slider("Simulated Paths", 500, 10000, 2000, step=100)
+n_paths = st.sidebar.slider("Simulated Paths", 500, 5000, 1000, step=100)
 n_display_paths = st.sidebar.slider("Displayed Paths", 10, 200, 50, step=10)
 epsilon_factor = st.sidebar.slider("Probability Range Factor", 0.1, 1.0, 0.25, step=0.05)
 garch_p = st.sidebar.slider("GARCH p", 1, 3, 1)
 garch_q = st.sidebar.slider("GARCH q", 1, 3, 1)
+subsample_factor = st.sidebar.slider("Time Subsample Factor", 0.1, 1.0, 0.2, step=0.1)
 
 end_date = pd.Timestamp.now(tz='UTC')
 start_date = end_date - pd.Timedelta(days=days_history)
@@ -184,13 +203,16 @@ if df is not None and len(df) > 50 and df['close'].std() > 1e-6:
         mu = np.full(N, mu)
 
     metric = VolatilityMetric(sigma, mu, times, T)
+    if np.any(metric.sigma_interp(times) < 1e-6):
+        st.warning("GARCH volatility too low; clamping may affect geometry.")
+
     with st.spinner("Simulating price paths..."):
-        paths, t = simulate_paths_manifold(metric, p0, T, N, n_paths)
+        paths, t = simulate_paths_manifold(metric, p0, T, N, n_paths, subsample_factor)
         paths = np.exp(paths)  # Convert back to price
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        final_prices = np.exp(paths[:, -1])  # Convert to price
+        final_prices = np.exp(paths[:, -1])
         kde = gaussian_kde(final_prices)
         price_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
         u = kde(price_grid)
@@ -216,12 +238,12 @@ if df is not None and len(df) > 50 and df['close'].std() > 1e-6:
 
         with st.spinner("Computing geodesic path..."):
             geodesic_df = compute_geodesic(metric, t, p0, prices[-1], T)
-            geodesic_df['Price'] = np.exp(geodesic_df['Price'])  # Convert to price
+            geodesic_df['Price'] = np.exp(geodesic_df['Price'])
 
         regime = classify_regime(geodesic_df, np.exp(prices), times)
         st.write(f"Market Regime: {regime}")
 
-        path_data = [{"Time": t[j], "Price": np.exp(paths[i, j]), "Path": f"Path_{i}"} 
+        path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} 
                      for i in range(min(n_paths, n_display_paths)) for j in range(N)]
         plot_df = pd.concat([pd.DataFrame(path_data), geodesic_df])
         support_df = pd.DataFrame({"Price": support_levels})
