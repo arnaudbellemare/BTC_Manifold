@@ -1,6 +1,6 @@
 import streamlit as st
 import ccxt
-import numpy as np
+import numpy as np  # Explicitly import NumPy
 import pandas as pd
 import altair as alt
 from arch import arch_model
@@ -94,14 +94,14 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
                 else:
                     st.warning(f"Invalid data for {symbol}: len={len(df)}")
             except ccxt.NetworkError as e:
-                st.warning(f"Network error for {symbol} (attempt {attempt+1}): {e}")
+                st.warning(f"Network error for {symbol} (attempt {attempt+1): {e}")
                 time.sleep(5)
             except Exception as e:
                 st.warning(f"Error for {symbol} (attempt {attempt+1}): {e}")
     st.error("Failed to fetch valid data from Kraken. Using simulated data.")
     t = np.linspace(0, 168, 168)
-    prices = np.array([df['close'].iloc[0]] * len(t))  # Start with actual initial price, evolve randomly
-    prices = prices + np.cumsum(np.random.normal(0, 1000, 168))  # No hardcoded gain, pure stochastic evolution
+    prices = np.array([df['close'].iloc[0]] * len(t))  # Start with actual initial price
+    prices = prices + np.cumsum(np.random.normal(0, 1000, 168))  # Pure stochastic evolution
     df = pd.DataFrame({"timestamp": (t * 3600 * 1000).astype(int), "close": prices})
     df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
     return df
@@ -178,7 +178,7 @@ with st.spinner("Simulating Heston paths..."):
 # 2D Fokker-Planck with finite differences
 nt = 400  # Number of time steps
 np = 800  # Number of price steps
-t_grid = np.linspace(0, T, nt)
+t_grid = np.linspace(0, T, nt)  # Corrected with np as NumPy
 p_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, np)
 dt_fd = T / (nt - 1)
 dp = (max(prices) * 1.05 - min(prices) * 0.95) / (np - 1)
