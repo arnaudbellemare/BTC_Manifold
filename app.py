@@ -102,13 +102,14 @@ if len(times) < 2 or not np.all(np.isfinite(times)) or not np.all(np.isfinite(pr
 
 # GARCH volatility
 returns = 100 * np.diff(prices) / prices[:-1]
-sigma = np.array([0.2] * len(prices))  # Fallback
+sigma = np.array([0.02] * len(prices))  # Fallback (2% volatility, scaled for BTC prices)
 if len(returns) > 5:
     try:
         model = arch_model(returns, vol='Garch', p=1, q=1, rescale=False)
         res = model.fit(disp='off')
         sigma = res.conditional_volatility / 100
         sigma = np.pad(sigma, (0, 1), mode='edge')
+        sigma = np.clip(sigma, 0.01, 0.1)  # Avoid extreme volatility
     except Exception as e:
         st.warning(f"GARCH failed: {e}. Using constant volatility.")
 
@@ -131,38 +132,55 @@ def simulate_paths(p0, mu, sigma, T, N, n_paths):
 with st.spinner("Simulating price paths..."):
     paths, t = simulate_paths(p0, mu, sigma, T, N, n_paths)
 
-# Fokker-Planck equation for transition density
+# Fokker-Planck equation
 def fokker_planck(t, u, sigma, mu, prices, dp):
-    # Simplified 1D Fokker-Planck for price (time discretized)
+    # Simplified 1D Fokker-Planck for price
+    sigma_t = sigma[int(np.clip(t / T * (len(sigma) - 1), 0, len(sigma) - 1))]
     d2u = np.zeros_like(u)
     du = np.zeros_like(u)
+    price_mid = prices[1:-1] if len(prices) > 2 else prices
     d2u[1:-1] = (u[2:] - 2*u[1:-1] + u[:-2]) / dp**2
     du[1:-1] = (u[2:] - u[:-2]) / (2 * dp)
-    sigma_t = sigma[int(np.clip(t / T * (len(sigma) - 1), 0, len(sigma) - 1))]
-    return 0.5 * (sigma_t * prices[1:-1])**2 * d2u[1:-1] - mu * prices[1:-1] * du[1:-1]
+    result = np.zeros_like(u)
+    result[1:-1] = 0.5 * (sigma_t * price_mid)**2 * d2u[1:-1] - mu * price_mid * du[1:-1]
+    return result
 
 # Discretize price space
 price_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, 100)
 dp = price_grid[1] - price_grid[0]
-u0 = np.exp(-((price_grid - p0)**2) / (2 * sigma[0]**2))  # Initial Gaussian
+# Use price-scaled standard deviation for initial Gaussian
+sigma_init = 0.01 * p0  # 1% of initial price
+u0 = np.exp(-((price_grid - p0)**2) / (2 * sigma_init**2))
+u0 = np.clip(u0, 0, 1e10)  # Prevent overflow
 u0 /= np.trapz(u0, price_grid)  # Normalize
 
 # Solve Fokker-Planck
 with st.spinner("Solving Fokker-Planck equation..."):
-    sol = solve_ivp(
-        fokker_planck,
-        [0, T],
-        u0,
-        method='RK45',
-        t_eval=np.linspace(0, T, 10),
-        args=(sigma, mu, price_grid, dp)
-    )
-    u = sol.y[:, -1]  # Density at final time
-    u /= np.trapz(u, price_grid)  # Normalize
+    try:
+        sol = solve_ivp(
+            fokker_planck,
+            [0, T],
+            u0,
+            method='RK45',
+            t_eval=np.linspace(0, T, 10),
+            args=(sigma, mu, price_grid, dp),
+            rtol=1e-3,
+            atol=1e-6
+        )
+        u = sol.y[:, -1]
+        u = np.clip(u, 0, 1e10)  # Prevent overflow
+        u /= np.trapz(u, price_grid)  # Normalize
+    except Exception as e:
+        st.error(f"Fokker-Planck solver failed: {e}. Using fallback density.")
+        u = np.exp(-((price_grid - p0)**2) / (2 * (sigma_init * 2)**2))
+        u /= np.trapz(u, price_grid)
 
 # Identify support/resistance levels
 peaks, _ = find_peaks(u, height=0.1 * u.max())
 support_resistance = price_grid[peaks]
+if len(support_resistance) == 0:
+    st.warning("No significant peaks found. Using price grid quantiles.")
+    support_resistance = np.quantile(price_grid, [0.25, 0.5, 0.75])
 
 # Compute hit probabilities
 probs = []
@@ -186,8 +204,12 @@ try:
         "Path": "Geodesic"
     })
 except Exception as e:
-    st.error(f"Geodesic computation failed: {e}")
-    st.stop()
+    st.error(f"Geodesic computation failed: {e}. Using linear approximation.")
+    geodesic_df = pd.DataFrame({
+        "Time": t,
+        "Price": p0 + (delta_p / T) * t,
+        "Path": "Geodesic"
+    })
 
 # Prepare data for Altair
 path_data = []
