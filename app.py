@@ -99,11 +99,11 @@ def visualize_manifold(sigma_data, t_grid, history_df):
     end_date = pd.to_datetime("2025-07-07 23:59:59")
     viz_df['Time'] = start_date + pd.to_timedelta(t_grid, unit='h')
 
-    # Validate and convert history_df
+    # Validate and convert history_df (assuming Time is in milliseconds)
     if history_df.empty or 'Time' not in history_df or 'Price' not in history_df:
         st.error("Invalid history_df. Ensure it contains 'Time' and 'Price' columns.")
         return None
-    history_df['Time'] = pd.to_datetime(history_df['Time'], unit='s', origin=pd.Timestamp("1970-01-01"))
+    history_df['Time'] = pd.to_datetime(history_df['Time'], unit='ms', origin=pd.Timestamp("1970-01-01"))
     if history_df['Price'].isna().all():
         st.error("No valid price data in history_df.")
         return None
