@@ -176,10 +176,11 @@ with st.spinner("Simulating Heston paths..."):
     paths, t, variances = simulate_paths(p0, mu, v0, kappa, theta, xi, rho, sigma, T, N, n_paths)
 
 # 2D Fokker-Planck with finite differences
+# 2D Fokker-Planck with finite differences
 nt = 400  # Number of time steps
 np = 800  # Number of price steps
-t_grid = np.linspace(0, T, nt)  # Corrected with np as NumPy
-p_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, np)
+t_grid = np.linspace(0, T, nt)  # Time grid
+p_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, np)  # Price grid
 dt_fd = T / (nt - 1)
 dp = (max(prices) * 1.05 - min(prices) * 0.95) / (np - 1)
 
