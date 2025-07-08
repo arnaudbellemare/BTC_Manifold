@@ -5,7 +5,6 @@ import pandas as pd
 import altair as alt
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
-from geomstats.geometry.euclidean import Euclidean
 from geomstats.numerics.geodesic import ExpODESolver
 from geomstats.numerics.ivp import ScipySolveIVP
 from scipy.integrate import solve_ivp
@@ -22,8 +21,11 @@ st.title("BTC/USD Rigorous Riemannian Manifold Analysis (July 1-7, 2025)")
 # Advanced Riemannian metric with full implementations
 class AdvancedRiemannianMetric(RiemannianMetric):
     def __init__(self, sigma, t, T, prices, variances):
-        # --- FIX: Changed constructor for backward compatibility with older geomstats versions ---
-        super().__init__(dim=2)
+        # --- FINAL FIX: Call super() with no arguments for maximum compatibility ---
+        # This works on very old and new versions of geomstats.
+        super().__init__()
+        self.dim = 2 # Explicitly set the dimension attribute
+        
         self.sigma = sigma
         self.t = t
         self.T = T
@@ -47,18 +49,14 @@ class AdvancedRiemannianMetric(RiemannianMetric):
         for i in range(2):
             for j in range(2):
                 for k in range(2):
-                    # This computes d_k g_ij etc. using central differences
                     val = 0
                     for l in range(2):
-                        term1_deriv_vec = np.zeros(2); term1_deriv_vec[j] = epsilon
-                        dg_ik_dj = (self.metric_matrix(base_point + term1_deriv_vec)[i,k] - self.metric_matrix(base_point - term1_deriv_vec)[i,k]) / (2*epsilon)
-                        
-                        term2_deriv_vec = np.zeros(2); term2_deriv_vec[i] = epsilon
-                        dg_jk_di = (self.metric_matrix(base_point + term2_deriv_vec)[j,k] - self.metric_matrix(base_point - term2_deriv_vec)[j,k]) / (2*epsilon)
-                        
-                        term3_deriv_vec = np.zeros(2); term3_deriv_vec[k] = epsilon
-                        dg_ij_dk = (self.metric_matrix(base_point + term3_deriv_vec)[i,j] - self.metric_matrix(base_point - term3_deriv_vec)[i,j]) / (2*epsilon)
-
+                        h_j = np.zeros(2); h_j[j] = epsilon
+                        dg_ik_dj = (self.metric_matrix(base_point + h_j)[i, k] - self.metric_matrix(base_point - h_j)[i, k]) / (2 * epsilon)
+                        h_i = np.zeros(2); h_i[i] = epsilon
+                        dg_jk_di = (self.metric_matrix(base_point + h_i)[j, k] - self.metric_matrix(base_point - h_i)[j, k]) / (2 * epsilon)
+                        h_k = np.zeros(2); h_k[k] = epsilon
+                        dg_ij_dk = (self.metric_matrix(base_point + h_k)[i, j] - self.metric_matrix(base_point - h_k)[i, j]) / (2 * epsilon)
                         val += g_inv[k, l] * 0.5 * (dg_ik_dj + dg_jk_di - dg_ij_dk)
                     christoffels[i, j, k] = val
         return christoffels
@@ -68,12 +66,10 @@ class AdvancedRiemannianMetric(RiemannianMetric):
         base_point = np.asarray(base_point)
         
         def objective(velocity):
-            # Exp map: Shoot a geodesic from base_point with initial velocity
             geodesic_path = self.exp_solver.solve(velocity, base_point)
             final_point = geodesic_path[-1]
             return final_point - point
         
-        # Initial guess for velocity is a straight line
         initial_guess = point - base_point
         sol = root(objective, initial_guess, method='hybr', tol=1e-5)
         
@@ -85,8 +81,7 @@ class AdvancedRiemannianMetric(RiemannianMetric):
 @st.cache_data
 def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
     exchange = ccxt.kraken()
-    try:
-        exchange.load_markets()
+    try: exchange.load_markets()
     except Exception as e:
         st.warning(f"Failed to load Kraken markets: {e}")
         return None
@@ -98,21 +93,18 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
             df = df[(df['datetime'] >= start_date) & (df['datetime'] <= end_date)].dropna()
-            if len(df) >= 10:
-                st.write(f"Success: Fetched {len(df)} data points for {symbol}")
-                return df
-        except Exception as e:
-            st.warning(f"Error fetching {symbol}: {e}")
+            if len(df) >= 10: return df
+        except Exception as e: st.warning(f"Error fetching {symbol}: {e}")
     
-    st.error("Failed to fetch valid data. Using simulated data for demonstration.")
+    st.error("Failed to fetch valid data. Using simulated data.")
     sim_t = pd.date_range(start=start_date, periods=168, freq='h')
     sim_prices = 70000 + np.cumsum(np.random.normal(0, 500, 168))
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'timestamp': sim_t.astype(np.int64) // 10**6})
 
 # Parameters & Data Prep
 st.sidebar.header("Parameters")
-n_paths = st.sidebar.slider("Number of Simulated Paths", 100, 2000, 1000, step=100)
-n_display_paths = st.sidebar.slider("Number of Paths to Display", 10, 200, 50, step=10)
+n_paths = st.sidebar.slider("Number of Paths", 100, 2000, 1000, step=100)
+n_display_paths = st.sidebar.slider("Paths to Display", 10, 200, 50, step=10)
 
 df = fetch_kraken_data(['BTC/USD'], '1h', pd.to_datetime("2025-07-01"), pd.to_datetime("2025-07-07 23:59:59"), 168)
 prices = df['close'].values
@@ -120,20 +112,20 @@ times = (df['timestamp'] - df['timestamp'].iloc[0]) / (1000 * 3600)
 T = times.iloc[-1]
 N = len(prices)
 p0 = prices[0]
-returns = np.log(prices[1:] / prices[:-1])
-mu = np.mean(returns) * 24 * 365
+returns = np.log(prices[1:] / prices[:-1]) if len(prices) > 1 else np.array([])
+mu = np.mean(returns) * 24 * 365 if len(returns) > 0 else 0.0
 
 # Volatility Modeling
 v0 = np.var(returns) if len(returns) > 0 else 0.01**2
-kappa, theta, xi, rho = 0.1, v0, 0.1, -0.3
 sigma = np.sqrt(v0) * np.ones(N)
-try:
-    garch_model = arch_model(returns * 100, vol='Garch', p=1, q=1).fit(disp='off')
-    sigma = np.concatenate(([garch_model.conditional_volatility[0]], garch_model.conditional_volatility)) / 100
-except Exception:
-    st.warning("GARCH failed. Using default volatility.")
+if len(returns) > 5:
+    try:
+        garch_model = arch_model(returns * 100, vol='Garch', p=1, q=1).fit(disp='off')
+        sigma = np.concatenate(([garch_model.conditional_volatility[0]], garch_model.conditional_volatility)) / 100
+    except Exception: st.warning("GARCH failed. Using default volatility.")
 
 # Heston Simulation
+kappa, theta, xi, rho = 0.1, v0, 0.1, -0.3
 def simulate_paths(p0, mu, v0, kappa, theta, xi, rho, T, N, n_paths):
     dt = T / (N - 1)
     t = np.linspace(0, T, N)
@@ -171,9 +163,14 @@ for i in range(nt - 1):
     g_p = np.array([metric_fp.metric_matrix([current_time, p]) for p in p_grid])
     g_inv_pp = 1 / g_p[:, 1, 1]
     sqrt_det_g = np.sqrt(g_p[:, 1, 1])
-    L_LB = D_bwd @ diags(sqrt_det_g * g_inv_pp) @ D_fwd
-    L_drift = diags((mu / (365*24)) * p_grid) @ D_fwd
-    L = 0.5 * diags(p_grid**2) @ L_LB + L_drift
+    L_LB_op = D_bwd @ diags(sqrt_det_g * g_inv_pp) @ D_fwd
+    L_drift_op = diags((mu / (365*24)) * p_grid) @ D_fwd
+    
+    # Boundary conditions: No flux
+    L_LB_op.setdiag(0, k=0); L_LB_op.setdiag(0, k=-1)
+    L_drift_op.setdiag(0, k=0); L_drift_op.setdiag(0, k=-1)
+
+    L = 0.5 * diags(p_grid**2) @ L_LB_op + L_drift_op
     LHS = I - 0.5 * dt_fd * L
     RHS = (I + 0.5 * dt_fd * L) @ u[i, :]
     u[i + 1, :] = spsolve(LHS, RHS)
@@ -181,14 +178,13 @@ for i in range(nt - 1):
     norm = np.trapz(u[i + 1, :], p_grid)
     if norm > 1e-9: u[i + 1, :] /= norm
 
-# Identify stable levels from potential minima
+# Analysis
 u_density = u[-1, :]
 V_eff = -np.log(u_density + 1e-20)
 V_eff -= V_eff.min()
 potential_minima_idx, _ = find_peaks(-V_eff, distance=int(n_p_steps/20), height=-np.log(0.8))
 stable_levels = p_grid[potential_minima_idx]
 
-# Geodesic Calculation
 metric = AdvancedRiemannianMetric(sigma, t, T, prices, variances)
 def geodesic_equation(s, y):
     pos = y[:2]; vel = y[2:]
@@ -198,24 +194,15 @@ def geodesic_equation(s, y):
 
 try:
     initial_point = np.array([0.0, p0])
-    initial_velocity = np.array([1.0, (prices[-1] - p0) / T])
+    initial_velocity = np.array([1.0, (prices[-1] - p0) / T if T > 0 else 0.0])
     y0 = np.concatenate([initial_point, initial_velocity])
     sol = solve_ivp(geodesic_equation, [0, T], y0, t_eval=t, rtol=1e-5, atol=1e-7)
     geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
 except Exception as e:
     st.error(f"Geodesic computation failed: {e}. Using linear approximation.")
-    geodesic_df = pd.DataFrame({"Time": t, "Price": p0 + ((prices[-1] - p0) / T) * t, "Path": "Geodesic"})
+    geodesic_df = pd.DataFrame({"Time": t, "Price": p0 + initial_velocity[1] * t, "Path": "Geodesic"})
 
-# --- FIX: Corrected Trending/Reversion analysis to use average path distance ---
-avg_distances = []
-for j in range(n_paths):
-    dist_sum = 0
-    for i in range(N):
-        path_point = np.array([t[i], paths[j, i]])
-        geodesic_point = np.array([geodesic_df["Time"].iloc[i], geodesic_df["Price"].iloc[i]])
-        dist_sum += metric.dist(path_point, geodesic_point)
-    avg_distances.append(dist_sum / N)
-
+avg_distances = [np.mean([metric.dist(np.array([t[i], paths[j, i]]), np.array([geodesic_df["Time"].iloc[i], geodesic_df["Price"].iloc[i]])) for i in range(N)]) for j in range(n_paths)]
 avg_distances = np.array(avg_distances)
 trending_threshold = np.percentile(avg_distances, 25)
 reversion_threshold = np.percentile(avg_distances, 75)
