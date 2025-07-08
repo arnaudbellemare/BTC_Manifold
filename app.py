@@ -9,9 +9,13 @@ import plotly.graph_objects as go
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
 import warnings
+import geomstats
 
 warnings.filterwarnings("ignore")
 st.set_page_config(layout="wide")
+
+# Debug: Check geomstats version
+st.write("Debug: geomstats version:", geomstats.__version__)
 
 # --- Page Title and Introduction ---
 st.title("Multi-Asset Market Analysis on a Fisher Information Manifold")
@@ -30,10 +34,17 @@ class FisherVolumeMetric(RiemannianMetric):
     is the time-varying, volume-weighted inverse covariance matrix.
     """
     def __init__(self, inv_cov_series, volume_factor_series):
-        super().__init__(dim=3)
+        # Initialize with dimension and default signature for Euclidean space
+        super().__init__(dim=3, signature=(3, 0))  # 3 positive eigenvalues, 0 negative
         self.inv_cov_series = inv_cov_series
         self.volume_factor_series = volume_factor_series
         self.n_times = len(inv_cov_series)
+
+        # Validate inputs
+        if self.inv_cov_series.empty or self.volume_factor_series.empty:
+            raise ValueError("inv_cov_series or volume_factor_series is empty")
+        if len(self.inv_cov_series) != len(self.volume_factor_series):
+            raise ValueError("inv_cov_series and volume_factor_series have mismatched lengths")
 
     def set_time_params(self, t_max):
         self.t_max = t_max
@@ -66,7 +77,7 @@ class FisherVolumeMetric(RiemannianMetric):
         try:
             g_inv = inv(self.metric_matrix(base_point))
         except LinAlgError:
-            g_inv = np.eye(3) # Fallback to Euclidean if metric is singular
+            g_inv = np.eye(3)  # Fallback to Euclidean if metric is singular
 
         # Γ^k_ij = 0.5 * g^kl * (∂g_li/∂x^j + ∂g_lj/∂x^i - ∂g_ij/∂x^l)
         # Simplified because g only depends on x^0 = t
@@ -257,11 +268,15 @@ if df is not None:
 
     # Debug: Check inv_cov_series
     st.write("Debug: inv_cov_series shape:", inv_cov_series.shape)
+    st.write("Debug: inv_cov_series columns:", list(inv_cov_series.columns))
 
     # Calculate volume factor
     total_volume = df['BTC_volume'] * df['BTC_close'] + df['ETH_volume'] * df['ETH_close']
     volume_factor = 1 / (1 + total_volume / total_volume.mean())
     volume_factor = volume_factor.rolling(window=rolling_window).mean().dropna()
+
+    # Debug: Check volume_factor
+    st.write("Debug: volume_factor shape:", volume_factor.shape)
 
     # Align all data series
     common_index = cov_series.index.intersection(inv_cov_series.index).intersection(volume_factor.index)
@@ -273,12 +288,17 @@ if df is not None:
     st.write("Debug: aligned_prices shape:", aligned_prices.shape)
     st.write("Debug: common_index length:", len(common_index))
 
-    if aligned_prices.empty:
-        st.error("Aligned data is empty. Check data alignment or rolling window size.")
+    if aligned_prices.empty or inv_cov_series.empty or volume_factor.empty:
+        st.error("Aligned data, inv_cov_series, or volume_factor is empty. Check data alignment or rolling window size.")
         st.stop()
 
     # Initialize Metric and Geodesic
-    metric = FisherVolumeMetric(inv_cov_series, volume_factor)
+    try:
+        metric = FisherVolumeMetric(inv_cov_series, volume_factor)
+    except Exception as e:
+        st.error(f"Failed to initialize FisherVolumeMetric: {str(e)}")
+        st.stop()
+
     T_total_hours = (aligned_prices.index[-1] - aligned_prices.index[0]).total_seconds() / 3600
     metric.set_time_params(T_total_hours)
     
