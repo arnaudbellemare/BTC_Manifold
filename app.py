@@ -70,28 +70,30 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
 # --- CORRECTED: Function to visualize the manifold's geometry ---
 def visualize_manifold(metric, t_grid, p_grid):
     st.subheader("Visualizing the Market Manifold")
-    st.write("This heatmap shows the 'cost' of price movement (technically, the `g_pp` component of the metric tensor) over time. Yellow areas represent high volatility, where the manifold is 'stretched' and price movement is difficult. Dark areas are low-volatility regions where price movement is easier.")
+    st.write("This heatmap shows the 'cost' of price movement over time. Yellow areas represent high volatility, where the manifold is 'stretched' and price movement is difficult. Dark areas are low-volatility regions where price movement is easier.")
     
-    # 1. Create a proper 2D grid for the heatmap data
+    # Define a scaling factor to make the tiny cost values visible
+    SCALING_FACTOR = 10000 
+    
     g_pp_values = []
     for t_val in t_grid:
-        # Cost is the same for all prices at a given time t
+        # Cost is the same for all prices at a given time t for this metric
         cost = metric.metric_matrix([t_val, 0])[1, 1]
+        scaled_cost = cost * SCALING_FACTOR # Scale the cost
         for p_val in p_grid:
-            g_pp_values.append({'Time': t_val, 'Price': p_val, 'Cost': cost})
+            g_pp_values.append({'Time': t_val, 'Price': p_val, 'Cost': scaled_cost})
     
     g_df = pd.DataFrame(g_pp_values)
     min_cost, max_cost = g_df['Cost'].min(), g_df['Cost'].max()
 
-    # 2. Create the heatmap with correct x, y, and color encodings
     heatmap = alt.Chart(g_df).mark_rect().encode(
         x='Time:Q',
         y=alt.Y('Price:Q', scale=alt.Scale(zero=False)),
         color=alt.Color('Cost:Q', 
                         scale=alt.Scale(scheme='viridis', domain=[min_cost, max_cost]), 
-                        legend=alt.Legend(title="Price Movement 'Cost'"))
+                        legend=alt.Legend(title=f"Cost (σ² × {SCALING_FACTOR})")) # Update legend title
     ).properties(
-        title="Market Manifold Geometry (g_pp = σ(t)²)",
+        title="Market Manifold Geometry",
     )
     
     return heatmap
@@ -211,11 +213,8 @@ with col1:
 
 with col2:
     # DISPLAY THE CORRECTED MANIFOLD VISUALIZATION
-    # A coarser grid for the price axis is fine for visualization
     viz_p_grid = np.linspace(prices.min(), prices.max(), 50)
     manifold_heatmap = visualize_manifold(metric, t, viz_p_grid)
-    
-    # Overlay the actual historical price path on the heatmap
     history_df = pd.DataFrame({'Time': times, 'Price': prices})
     history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2.5, opacity=0.7).encode(x='Time:Q', y='Price:Q')
     
