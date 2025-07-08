@@ -12,3 +12,4 @@ mpi4py
 plotly
 numba
 joblib 
+scikit-learn
