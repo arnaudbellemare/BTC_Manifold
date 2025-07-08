@@ -96,36 +96,23 @@ def fit_garch(returns, p=1, q=1):
         return np.full(len(returns), np.clip(returns.std() / 100, 1e-6, 1.0)), np.clip(returns.mean() / 100, -0.1, 0.1)
 
 def rdog_geodesic(metric, initial_point, end_point, n_steps=100, max_iter=100, epsilon=1e-6, zeta_kappa=1.0):
-    """
-    Compute geodesic using Riemannian Discrete Optimization on Geodesics (RDoG).
-    Iteratively updates position and velocity to minimize geodesic distance.
-    
-    Parameters:
-    - metric: VolatilityMetric instance
-    - initial_point: Starting point [t0, p0]
-    - end_point: Ending point [t1, p1]
-    - n_steps: Number of time steps in the path
-    - max_iter: Maximum optimization iterations
-    - epsilon: Small constant to avoid division by zero
-    - zeta_kappa: Scaling factor for step size (default=1.0)
-    
-    Returns:
-    - pd.DataFrame with 'Time' and 'Price' columns
-    """
     t = np.linspace(0, 1, n_steps)
     path = []
-    x = np.array(initial_point)
-    x0 = np.array(end_point)
-    v = (x0 - x) / 1.0  # Initial velocity (linear approximation)
-    
+    x = np.array(initial_point, dtype=np.float64)
+    x0 = np.array(end_point, dtype=np.float64)
+    v = (x0 - x) / 1.0  # Initial velocity
     for _ in range(max_iter):
-        g = metric.log(x0, x)  # Logarithm map to target
-        rt = np.sqrt(np.sum((x - x0)**2))  # Proxy for geodesic distance
+        g = metric.log(x0, x)
+        if not np.isfinite(g).all():
+            st.warning("Non-finite logarithm in RDoG. Adjusting position.")
+            x = (x + x0) / 2
+            g = metric.log(x0, x)
+        rt = np.sqrt(np.sum((x - x0)**2))
         rt_bar = max(epsilon, rt)
         eta_t = rt_bar / np.sqrt(zeta_kappa * max(metric.metric_matrix(x)[1, 1], 1e-6))
         x_new = metric.exp(x, -eta_t * g)
         if not np.isfinite(x_new).all():
-            st.warning("Non-finite values in geodesic computation. Adjusting step size.")
+            st.warning("Non-finite values in RDoG. Reducing step size.")
             eta_t *= 0.5
             x_new = metric.exp(x, -eta_t * g)
         x = x_new
@@ -133,11 +120,10 @@ def rdog_geodesic(metric, initial_point, end_point, n_steps=100, max_iter=100, e
         path.append(x.copy())
         if rt < epsilon:
             break
-    
     path = np.array(path)
     if path.shape[0] < n_steps:
         path = np.vstack([path, np.tile(path[-1], (n_steps - path.shape[0], 1))])
-    path = path[:n_steps]  # Ensure exactly n_steps
+    path = path[:n_steps]
     return pd.DataFrame({"Time": path[:, 0], "Price": path[:, 1], "Path": "Geodesic"})
 
 def compute_single_path(p0, T, N, dt, drift, diffusion, rng_seed):
@@ -180,7 +166,7 @@ def simulate_paths_manifold(metric, p0, T, N, n_paths, subsample_factor=0.2):
         diffusion = np.sqrt(g_inv_22)
     
     try:
-        paths_coarse = np.array(Parallel(n_jobs=-1, backend='loky')(
+        paths_coarse = np.array(Parallel(n_jobs=-1)(
             delayed(compute_single_path)(p0, T, N_coarse, dt, drift, diffusion, i)
             for i in range(n_paths)
         ))
@@ -251,6 +237,169 @@ def visualize_manifold(metric, t_grid, p_grid):
                         legend=alt.Legend(title=f"Cost (σ² × {SCALING_FACTOR})"))
     ).properties(title="Market Manifold Geometry")
 
+# --- Main Analyzer Class ---
+class MarketManifoldAnalyzer:
+    def __init__(self, symbol, timeframe, start_date, end_date, n_paths, n_display_paths, epsilon_factor, garch_p, garch_q, subsample_factor):
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.start_date = start_date
+        self.end_date = end_date
+        self.n_paths = n_paths
+        self.n_display_paths = n_display_paths
+        self.epsilon_factor = epsilon_factor
+        self.garch_p = garch_p
+        self.garch_q = garch_q
+        self.subsample_factor = subsample_factor
+        self.df = None
+        self.prices = None
+        self.times = None
+        self.T = None
+        self.N = None
+        self.p0 = None
+        self.metric = None
+        self.paths = None
+        self.t = None
+        self.final_prices = None
+        self.price_grid = None
+        self.u = None
+        self.support_levels = None
+        self.resistance_levels = None
+        self.support_probs = None
+        self.resistance_probs = None
+        self.geodesic_df = None
+        self.regime = None
+
+    def fetch_and_process_data(self):
+        self.df = fetch_kraken_data(self.symbol, self.timeframe, self.start_date, self.end_date)
+        if self.df is not None and len(self.df) > 50 and self.df['close'].std() > 1e-6:
+            self.prices = np.log(self.df['close'].values)
+            self.times = (self.df['datetime'] - self.df['datetime'].iloc[0]).dt.total_seconds() / 3600
+            self.T = self.times.iloc[-1]
+            self.N = len(self.prices)
+            self.p0 = self.prices[0]
+            return True
+        return False
+
+    def simulate_and_analyze(self):
+        if not self.fetch_and_process_data():
+            st.error("Insufficient or invalid data for analysis.")
+            return False
+        
+        with st.spinner("Fitting GARCH model..."):
+            returns = 100 * self.df['close'].pct_change().dropna()
+            sigma, mu = fit_garch(returns, self.garch_p, self.garch_q)
+            sigma = np.pad(sigma, (self.N - len(sigma), 0), mode='edge')
+            mu = np.full(self.N, mu)
+
+        self.metric = VolatilityMetric(sigma, mu, self.times, self.T)
+        if np.any(self.metric.sigma_interp(self.times) < 1e-6):
+            st.warning("GARCH volatility too low; clamping may affect geometry.")
+
+        with st.spinner("Simulating price paths..."):
+            self.paths, self.t = simulate_paths_manifold(self.metric, self.p0, self.T, self.N, self.n_paths, self.subsample_factor)
+            self.paths = np.where(np.isfinite(self.paths), self.paths, self.p0)
+            self.paths = np.exp(self.paths)
+
+        self.final_prices = self.paths[:, -1]
+        if np.any(~np.isfinite(self.final_prices)):
+            st.warning("Final prices contain NaNs or Infs. Filtering invalid values.")
+            valid_mask = np.isfinite(self.final_prices)
+            self.final_prices = self.final_prices[valid_mask]
+            if len(self.final_prices) < 10:
+                st.error("Too few valid prices for KDE. Using historical quantiles for S/R.")
+                self.final_prices = np.exp(self.prices)
+        
+        try:
+            kde = gaussian_kde(self.final_prices)
+            self.price_grid = np.linspace(self.final_prices.min(), self.final_prices.max(), 500)
+            self.u = kde(self.price_grid)
+            self.u /= np.trapz(self.u, self.price_grid)
+        except:
+            st.warning("KDE failed. Using uniform distribution.")
+            self.u = np.ones_like(self.price_grid) / (self.price_grid.max() - self.price_grid.min())
+
+        critical_levels = np.exp(compute_critical_levels(self.metric, self.t, np.linspace(self.prices.min(), self.prices.max(), 50)))
+        self.support_levels = critical_levels[critical_levels <= np.median(critical_levels)]
+        self.resistance_levels = critical_levels[critical_levels > np.median(critical_levels)]
+
+        epsilon = self.epsilon_factor * np.mean([np.sqrt(self.metric.metric_matrix([self.T, np.log(p)])[1, 1]) 
+                                                for p in self.price_grid if np.isfinite(np.log(p))])
+        def get_hit_prob(level_list):
+            probs = []
+            for level in level_list:
+                if np.isfinite(np.log(level)):
+                    mask = (self.price_grid >= level - epsilon) & (self.price_grid <= level + epsilon)
+                    raw_prob = np.trapz(self.u[mask], self.price_grid[mask])
+                    volume_element = np.sqrt(np.abs(np.linalg.det(self.metric.metric_matrix([self.T, np.log(level)]))))
+                    probs.append(raw_prob * volume_element)
+                else:
+                    probs.append(0.0)
+            total_prob = sum(probs)
+            return [p / total_prob for p in probs] if total_prob > 0 else [0] * len(probs)
+        
+        self.support_probs = get_hit_prob(self.support_levels)
+        self.resistance_probs = get_hit_prob(self.resistance_levels)
+
+        with st.spinner("Computing geodesic path with RDoG..."):
+            self.geodesic_df = rdog_geodesic(self.metric, [0.0, self.p0], [self.T, self.prices[-1]], n_steps=self.N)
+
+        self.regime = classify_regime(self.geodesic_df, np.exp(self.prices), self.times)
+        return True
+
+    def visualize(self, n_display_paths):
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.write(f"Market Regime: {self.regime}")
+            path_data = [{"Time": self.t[j], "Price": self.paths[i, j], "Path": f"Path_{i}"} 
+                         for i in range(min(self.n_paths, n_display_paths)) for j in range(self.N) 
+                         if np.isfinite(self.paths[i, j])]
+            plot_df = pd.concat([pd.DataFrame(path_data), self.geodesic_df])
+            support_df = pd.DataFrame({"Price": self.support_levels})
+            resistance_df = pd.DataFrame({"Price": self.resistance_levels})
+            base = alt.Chart(plot_df).encode(x=alt.X("Time:Q", title="Time (hours)"), 
+                                            y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False)))
+            main_chart = (base.mark_line(opacity=0.2).encode(color=alt.value('gray'), detail='Path:N').transform_filter(alt.datum.Path != "Geodesic") +
+                          base.mark_line(strokeWidth=3, color="red").transform_filter(alt.datum.Path == "Geodesic") +
+                          alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q") +
+                          alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
+                         ).properties(title="Price Paths, Geodesic, and S/R Grid", height=500).interactive()
+            st.altair_chart(main_chart, use_container_width=True)
+
+        with col2:
+            viz_p_grid = np.linspace(np.exp(self.prices).min(), np.exp(self.prices).max(), 50)
+            manifold_heatmap = visualize_manifold(self.metric, self.t, viz_p_grid)
+            history_df = pd.DataFrame({'Time': self.times, 'Price': np.exp(self.prices)})
+            history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2.5).encode(x='Time:Q', y='Price:Q')
+            st.altair_chart((manifold_heatmap + history_line).properties(height=300).interactive(), use_container_width=True)
+
+            st.subheader("Analysis Summary")
+            st.metric("Expected Final Price", f"${np.mean(self.final_prices[np.isfinite(self.final_prices)]):,.2f}")
+            st.write("**Support Levels:**")
+            if self.support_levels.size > 0:
+                st.dataframe(pd.DataFrame({'Level': self.support_levels, 'Hit Probability': self.support_probs})
+                             .style.format({'Level': '${:,.2f}', 'Hit Probability': '{:.1%}'}))
+            else:
+                st.write("No distinct support levels.")
+            st.write("**Resistance Levels:**")
+            if self.resistance_levels.size > 0:
+                st.dataframe(pd.DataFrame({'Level': self.resistance_levels, 'Hit Probability': self.resistance_probs})
+                             .style.format({'Level': '${:,.2f}', 'Hit Probability': '{:.1%}'}))
+            else:
+                st.write("No distinct resistance levels.")
+
+            current_price = np.exp(self.prices[-1])
+            signals = []
+            for level, prob in zip(self.support_levels, self.support_probs):
+                if abs(current_price - level) < self.epsilon_factor and prob > 0.3:
+                    signals.append(f"Buy at ${level:.2f} (Support, {prob:.1%} probability)")
+            for level, prob in zip(self.resistance_levels, self.resistance_probs):
+                if abs(current_price - level) < self.epsilon_factor and prob > 0.3:
+                    signals.append(f"Sell at ${level:.2f} (Resistance, {prob:.1%} probability)")
+            if signals:
+                st.write("**Trading Signals:**")
+                for signal in signals:
+                    st.write(signal)
+
 # --- Main Application ---
 st.sidebar.header("Model Parameters")
 days_history = st.sidebar.slider("Historical Data (Days)", 7, 90, 30)
@@ -263,122 +412,19 @@ subsample_factor = st.sidebar.slider("Time Subsample Factor", 0.1, 1.0, 0.2, ste
 
 end_date = pd.Timestamp.now(tz='UTC')
 start_date = end_date - pd.Timedelta(days=days_history)
-df = fetch_kraken_data('BTC/USD', '1h', start_date, end_date)
 
-if df is not None and len(df) > 50 and df['close'].std() > 1e-6:
-    prices = np.log(df['close'].values)
-    times = (df['datetime'] - df['datetime'].iloc[0]).dt.total_seconds() / 3600
-    T = times.iloc[-1]
-    N = len(prices)
-    p0 = prices[0]
-    returns = 100 * df['close'].pct_change().dropna()
+analyzer = MarketManifoldAnalyzer(
+    symbol='BTC/USD',
+    timeframe='1h',
+    start_date=start_date,
+    end_date=end_date,
+    n_paths=n_paths,
+    n_display_paths=n_display_paths,
+    epsilon_factor=epsilon_factor,
+    garch_p=garch_p,
+    garch_q=garch_q,
+    subsample_factor=subsample_factor
+)
 
-    with st.spinner("Fitting GARCH model..."):
-        sigma, mu = fit_garch(returns, garch_p, garch_q)
-        sigma = np.pad(sigma, (N - len(sigma), 0), mode='edge')
-        mu = np.full(N, mu)
-
-    metric = VolatilityMetric(sigma, mu, times, T)
-    if np.any(metric.sigma_interp(times) < 1e-6):
-        st.warning("GARCH volatility too low; clamping may affect geometry.")
-
-    with st.spinner("Simulating price paths..."):
-        paths, t = simulate_paths_manifold(metric, p0, T, N, n_paths, subsample_factor)
-        paths = np.where(np.isfinite(paths), paths, p0)
-        paths = np.exp(paths)
-
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        final_prices = paths[:, -1]
-        if np.any(~np.isfinite(final_prices)):
-            st.warning("Final prices contain NaNs or Infs. Filtering invalid values.")
-            valid_mask = np.isfinite(final_prices)
-            final_prices = final_prices[valid_mask]
-            if len(final_prices) < 10:
-                st.error("Too few valid prices for KDE. Using historical quantiles for S/R.")
-                final_prices = np.exp(prices)
-        
-        try:
-            kde = gaussian_kde(final_prices)
-            price_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
-            u = kde(price_grid)
-            u /= np.trapz(u, price_grid)
-        except:
-            st.warning("KDE failed. Using uniform distribution.")
-            u = np.ones_like(price_grid) / (price_grid.max() - price_grid.min())
-
-        critical_levels = np.exp(compute_critical_levels(metric, t, np.linspace(prices.min(), prices.max(), 50)))
-        support_levels = critical_levels[critical_levels <= np.median(critical_levels)]
-        resistance_levels = critical_levels[critical_levels > np.median(critical_levels)]
-
-        epsilon = epsilon_factor * np.mean([np.sqrt(metric.metric_matrix([T, np.log(p)])[1, 1]) for p in price_grid if np.isfinite(np.log(p))])
-        def get_hit_prob(level_list):
-            probs = []
-            for level in level_list:
-                if np.isfinite(np.log(level)):
-                    mask = (price_grid >= level - epsilon) & (price_grid <= level + epsilon)
-                    raw_prob = np.trapz(u[mask], price_grid[mask])
-                    volume_element = np.sqrt(np.abs(np.linalg.det(metric.metric_matrix([T, np.log(level)]))))
-                    probs.append(raw_prob * volume_element)
-                else:
-                    probs.append(0.0)
-            total_prob = sum(probs)
-            return [p / total_prob for p in probs] if total_prob > 0 else [0] * len(probs)
-        
-        support_probs = get_hit_prob(support_levels)
-        resistance_probs = get_hit_prob(resistance_levels)
-
-        with st.spinner("Computing geodesic path with RDoG..."):
-            geodesic_df = rdog_geodesic(metric, [0.0, p0], [T, prices[-1]], n_steps=N)
-
-        regime = classify_regime(geodesic_df, np.exp(prices), times)
-        st.write(f"Market Regime: {regime}")
-
-        path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} 
-                     for i in range(min(n_paths, n_display_paths)) for j in range(N) if np.isfinite(paths[i, j])]
-        plot_df = pd.concat([pd.DataFrame(path_data), geodesic_df])
-        support_df = pd.DataFrame({"Price": support_levels})
-        resistance_df = pd.DataFrame({"Price": resistance_levels})
-        base = alt.Chart(plot_df).encode(x=alt.X("Time:Q", title="Time (hours)"), 
-                                        y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False)))
-        main_chart = (base.mark_line(opacity=0.2).encode(color=alt.value('gray'), detail='Path:N').transform_filter(alt.datum.Path != "Geodesic") +
-                      base.mark_line(strokeWidth=3, color="red").transform_filter(alt.datum.Path == "Geodesic") +
-                      alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q") +
-                      alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
-                     ).properties(title="Price Paths, Geodesic, and S/R Grid", height=500).interactive()
-        st.altair_chart(main_chart, use_container_width=True)
-
-    with col2:
-        viz_p_grid = np.linspace(np.exp(prices).min(), np.exp(prices).max(), 50)
-        manifold_heatmap = visualize_manifold(metric, t, viz_p_grid)
-        history_df = pd.DataFrame({'Time': times, 'Price': np.exp(prices)})
-        history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2.5).encode(x='Time:Q', y='Price:Q')
-        st.altair_chart((manifold_heatmap + history_line).properties(height=300).interactive(), use_container_width=True)
-
-        st.subheader("Analysis Summary")
-        st.metric("Expected Final Price", f"${np.mean(final_prices[np.isfinite(final_prices)]):,.2f}")
-        st.write("**Support Levels:**")
-        if support_levels.size > 0:
-            st.dataframe(pd.DataFrame({'Level': support_levels, 'Hit Probability': support_probs}).style.format({'Level': '${:,.2f}', 'Hit Probability': '{:.1%}'}))
-        else:
-            st.write("No distinct support levels.")
-        st.write("**Resistance Levels:**")
-        if resistance_levels.size > 0:
-            st.dataframe(pd.DataFrame({'Level': resistance_levels, 'Hit Probability': resistance_probs}).style.format({'Level': '${:,.2f}', 'Hit Probability': '{:.1%}'}))
-        else:
-            st.write("No distinct resistance levels.")
-
-        current_price = np.exp(prices[-1])
-        signals = []
-        for level, prob in zip(support_levels, support_probs):
-            if abs(current_price - level) < epsilon and prob > 0.3:
-                signals.append(f"Buy at ${level:.2f} (Support, {prob:.1%} probability)")
-        for level, prob in zip(resistance_levels, resistance_probs):
-            if abs(current_price - level) < epsilon and prob > 0.3:
-                signals.append(f"Sell at ${level:.2f} (Resistance, {prob:.1%} probability)")
-        if signals:
-            st.write("**Trading Signals:**")
-            for signal in signals:
-                st.write(signal)
-else:
-    st.error("Insufficient or invalid data for analysis.")
+if analyzer.simulate_and_analyze():
+    analyzer.visualize(n_display_paths)
