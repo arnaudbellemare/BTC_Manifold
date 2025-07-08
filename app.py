@@ -7,7 +7,7 @@ from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 from geomstats.geometry.euclidean import Euclidean
-from geomstats.numerics.geodesic import GeodesicIVP  # Added for solver
+from geomstats.numerics.geodesic import ScipySolveIVP  # Correct solver
 import warnings
 import time
 warnings.filterwarnings("ignore")
@@ -21,7 +21,7 @@ class VolatilityMetric(RiemannianMetric):
         self.sigma = sigma
         self.t = t
         self.T = T
-        self.exp_solver = GeodesicIVP()  # Set explicit solver
+        self.exp_solver = ScipySolveIVP()  # Set correct solver
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
@@ -184,7 +184,7 @@ paths = base.mark_line(opacity=0.05).transform_filter(
 )
 
 geodesic = base.mark_line(strokeWidth=3, color="red").transform_filter(
-    alt.datum.Path != "Geodesic"
+    alt.datum.Path == "Geodesic"
 )
 
 sr_lines = alt.Chart(sr_df).mark_rule(
