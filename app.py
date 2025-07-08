@@ -5,6 +5,7 @@ import pandas as pd
 from scipy.integrate import solve_ivp
 from scipy.linalg import inv, LinAlgError
 from geomstats.geometry.riemannian_metric import RiemannianMetric
+from geomstats.geometry.euclidean import Euclidean
 import plotly.graph_objects as go
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
@@ -34,18 +35,22 @@ class FisherVolumeMetric(RiemannianMetric):
     is the time-varying, volume-weighted inverse covariance matrix.
     """
     def __init__(self, inv_cov_series, volume_factor_series):
-        # Minimal initialization for older geomstats versions
-        super().__init__()
+        # Define a 3D Euclidean manifold as the base space
+        self.space = Euclidean(dim=3)
+        # Initialize RiemannianMetric with the space parameter
+        super().__init__(space=self.space)
         self.inv_cov_series = inv_cov_series
         self.volume_factor_series = volume_factor_series
         self.n_times = len(inv_cov_series)
-        self.dim = 3  # Define dimension manually for internal use
 
         # Validate inputs
         if self.inv_cov_series.empty or self.volume_factor_series.empty:
             raise ValueError("inv_cov_series or volume_factor_series is empty")
         if len(self.inv_cov_series) != len(self.volume_factor_series):
             raise ValueError("inv_cov_series and volume_factor_series have mismatched lengths")
+
+        # Debug: Confirm manifold initialization
+        st.write("Debug: Manifold initialized with dim:", self.space.dim)
 
     def set_time_params(self, t_max):
         self.t_max = t_max
