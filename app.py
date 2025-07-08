@@ -89,6 +89,7 @@ st.sidebar.header("Parameters")
 n_paths = st.sidebar.slider("Number of Paths", 500, 5000, 2000, step=100)
 n_display_paths = st.sidebar.slider("Paths to Display", 10, 200, 50, step=10)
 k_clusters = st.sidebar.slider("Number of Price Clusters (K)", 2, 8, 4, step=1)
+st.sidebar.info("Note: Price simulation is capped at $200,000.")
 
 df = fetch_kraken_data(['BTC/USD', 'XBT/USD'], '1h', pd.to_datetime("2025-07-01"), pd.to_datetime("2025-07-07 23:59:59"), 168)
 
@@ -107,9 +108,9 @@ if len(returns) > 5:
         sigma = np.concatenate(([garch.conditional_volatility[0]], garch.conditional_volatility)) / 100
     except Exception: st.warning("GARCH failed. Using default volatility.")
 
-# Heston Model Simulation
+# Heston Model Simulation with Price Ceiling
 kappa, theta, xi, rho = 0.1, v0, 0.1, -0.3
-def simulate_paths_heston(p0, mu, v0, kappa, theta, xi, rho, T, N, n_paths):
+def simulate_paths_heston(p0, mu, v0, kappa, theta, xi, rho, T, N, n_paths, price_cap=200000.0):
     if N == 0: return np.array([[p0]]), np.array([0]), np.array([[v0]])
     dt = T / (N - 1) if N > 1 else T
     t = np.linspace(0, T, N)
@@ -120,25 +121,20 @@ def simulate_paths_heston(p0, mu, v0, kappa, theta, xi, rho, T, N, n_paths):
         z2 = rho * z1 + np.sqrt(1 - rho**2) * np.random.normal(size=n_paths)
         variances[:, j] = np.maximum(variances[:, j-1] + kappa * (theta - variances[:, j-1]) * dt + xi * np.sqrt(variances[:, j-1]) * np.sqrt(dt) * z2, 1e-6)
         paths[:, j] = paths[:, j-1] * np.exp((mu - 0.5 * variances[:, j-1]) * dt + np.sqrt(variances[:, j-1]) * np.sqrt(dt) * z1)
+        # --- FIX: Impose a price ceiling on the simulation ---
+        paths[:, j] = np.clip(paths[:, j], 0, price_cap)
     return paths, t, variances
 
-with st.spinner("Simulating Heston paths..."):
+with st.spinner("Simulating Heston paths with price cap..."):
     paths, t, variances = simulate_paths_heston(p0, mu / (365*24), v0, kappa, theta, xi, rho, T, N, n_paths)
 
-# --- FOKKER-PLANCK SOLVER IS REMOVED ---
-# We now use the final points of the Monte Carlo simulation directly.
-# This is more robust and achieves the same goal.
-
-# --- K-MEANS CLUSTERING ON MONTE CARLO RESULTS ---
-# 1. Get the final price of each simulated path. This is our sample.
+# K-MEANS CLUSTERING ON MONTE CARLO RESULTS
 final_prices = paths[:, -1]
 expected_price = np.mean(final_prices)
 
-# 2. Run K-Means to find cluster centers on the final path data.
 kmeans = KMeans(n_clusters=k_clusters, random_state=42, n_init='auto').fit(final_prices.reshape(-1, 1))
 cluster_centers = sorted(kmeans.cluster_centers_.flatten())
 
-# 3. Classify centers and calculate probabilities based on cluster population
 support_levels, resistance_levels = [], []
 support_probs, resistance_probs = [], []
 labels = kmeans.labels_
@@ -169,7 +165,7 @@ except Exception as e:
     st.error(f"Geodesic computation failed: {e}. Using linear approximation.")
     geodesic_df = pd.DataFrame({"Time": t, "Price": p0 + initial_velocity[1] * t, "Path": "Geodesic"})
 
-# --- VISUALIZATION ---
+# VISUALIZATION
 path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} for i in range(min(n_paths, n_display_paths)) for j in range(N)]
 plot_df = pd.concat([pd.DataFrame(path_data), geodesic_df])
 support_df = pd.DataFrame({"Price": support_levels})
