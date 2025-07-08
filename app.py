@@ -10,7 +10,7 @@ from geomstats.numerics.geodesic import ExpODESolver
 from geomstats.numerics.ivp import ScipySolveIVP
 from scipy.integrate import solve_ivp
 from scipy.signal import find_peaks
-from scipy.sparse import diags
+from scipy.sparse import diags, csr_matrix
 from scipy.sparse.linalg import spsolve
 import time
 import warnings
@@ -176,7 +176,7 @@ with st.spinner("Simulating Heston paths..."):
     paths, t, variances = simulate_paths(p0, mu, v0, kappa, theta, xi, rho, sigma, T, N, n_paths)
 
 # 2D Fokker-Planck with finite differences
-nt, np = 200, 400
+nt, np = 400, 800  # High resolution
 t_grid = np.linspace(0, T, nt)
 p_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, np)
 dt_fd = T / (nt - 1)
@@ -188,18 +188,20 @@ sigma_init = np.sqrt(v0) * p0
 u[0, :] = np.exp(-((p_grid - p0)**2) / (2 * sigma_init**2))
 u[0, :] /= np.trapz(u[0, :], p_grid)
 
-# Finite difference scheme
-r = dt_fd / dp**2
+# Crank-Nicolson scheme for Fokker-Planck
+r = dt_fd / (2 * dp**2)
 A = diags([1, -2, 1], [-1, 0, 1], shape=(np, np)).toarray()
 A[0, 0] = A[-1, -1] = 1  # Neumann boundary
 A = r * A
+I = diags([1], [0], shape=(np, np)).toarray()
 
 for i in range(nt - 1):
     idx = int(i * (len(sigma) - 1) / (nt - 1))
     sigma_t = max(sigma[idx], 0.01)
     var_t = np.interp(t_grid[i], t, variances.mean(axis=0))
-    b = u[i, :] + dt_fd * (0.5 * var_t * p_grid**2 * np.dot(A, u[i, :]) - mu * p_grid * np.gradient(u[i, :], dp))
-    u[i + 1, :] = spsolve(diags([1], [0], shape=(np, np)).toarray() - r * var_t * p_grid**2, b)
+    b = u[i, :] + 0.5 * dt_fd * (0.5 * var_t * p_grid**2 * np.dot(A, u[i, :]) - mu * p_grid * np.gradient(u[i, :], dp))
+    A_eff = I - r * var_t * p_grid**2
+    u[i + 1, :] = spsolve(csr_matrix(A_eff), b)
     u[i + 1, :] = np.clip(u[i + 1, :], 1e-10, 1e10)
     u[i + 1, :] /= np.trapz(u[i + 1, :], p_grid)
 
@@ -362,19 +364,21 @@ christoffel = sym(zeros(2,2,2));
 d_sigma = diff(sigma(t), t);
 christoffel(2,2,1) = 0.5 * g_inv(1,1) * d_sigma * p / sigma(t);
 % Geodesic equation
-gamma_dot = [diff(p,t) diff(t,t)];
-geodesic_eq = christoffel .* gamma_dot * gamma_dot';
+syms gamma_dot1 gamma_dot2
+geodesic_eq = christoffel(2,2,1) * gamma_dot1^2;
 % Ricci curvature (approximate)
 ricci = simplify(diff(g_inv, t) - christoffel * christoffel');
 disp('Metric Matrix:'); disp(g);
 disp('Christoffel Symbols:'); disp(christoffel);
 disp('Ricci Curvature:'); disp(ricci);
-% Numerical geodesic (use ode45 with data)
+% Numerical geodesic
 tspan = [0 1];
 y0 = [0; p0; 1; 0]; % [t, p, dt, dp]
-[t_sol, y_sol] = ode45(@(t,y) geodesic_eq, tspan, y0);
-plot(t_sol, y_sol(:,2)); % Plot price vs time
-xlabel('Time'); ylabel('Price');
+options = odeset('RelTol', 1e-8, 'AbsTol', 1e-10);
+[t_sol, y_sol] = ode45(@(t,y) [y(3); y(4); -christoffel(2,2,1)*y(4)^2], tspan, y0, options);
+plot(t_sol, y_sol(:,2), 'LineWidth', 2);
+xlabel('Time'); ylabel('Price'); title('Geodesic Path');
+grid on;
 """
 st.write("**MATLAB Validation Script:**")
 st.code(matlab_script, language="matlab")
