@@ -30,40 +30,25 @@ class VolatilityMetric(RiemannianMetric):
 def fetch_kraken_data(symbols, timeframe, limit):
     exchange = ccxt.kraken()
     since = int((time.time() - limit * 3600) * 1000)  # Last 'limit' hours
+    st.write(f"Fetching data: since={pd.to_datetime(since, unit='ms')}, limit={limit}")
     for symbol in symbols:
-        for _ in range(3):
+        for attempt in range(7):  # Increased retries
             try:
                 ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-                if len(df) >= 10 and df['timestamp'].notnull().all():
-                    st.write(f"Fetched {len(df)} data points for {symbol}")
+                if len(df) >= 10 and df['timestamp'].notnull().all() and df['close'].notnull().all():
+                    st.write(f"Success: Fetched {len(df)} data points for {symbol} (attempt {attempt+1})")
                     return df
                 else:
-                    st.warning(f"Insufficient or invalid data for {symbol}: {len(df)} points")
+                    st.warning(f"Invalid data for {symbol}: {len(df)} points (attempt {attempt+1})")
             except ccxt.NetworkError as e:
-                st.warning(f"Network error for {symbol}: {e}")
-                time.sleep(3)
+                st.warning(f"Network error for {symbol} (attempt {attempt+1}): {e}")
+                time.sleep(5)
             except Exception as e:
-                st.warning(f"Error for {symbol}: {e}")
+                st.warning(f"Error for {symbol} (attempt {attempt+1}): {e}")
     st.error("Failed to fetch data from Kraken after trying all symbols")
     return None
-
-# Simulate price paths (pure NumPy)
-def simulate_paths(p0, mu, sigma, T, N, n_paths):
-    dt = T / N
-    t = np.linspace(0, T, N)
-    paths = np.zeros((n_paths, N))
-    paths[:, 0] = p0
-    dW = np.random.normal(0, np.sqrt(dt), (n_paths, N - 1))
-    for j in range(1, N):
-        paths[:, j] = paths[:, j-1] + mu * dt + sigma[j-1] * dW[:, j-1]
-    return paths, t
-
-# Compute density
-def compute_density(paths, n_bins):
-    hist, bins = np.histogram(paths.ravel(), bins=n_bins, density=True)
-    return hist, bins
 
 # Parameters
 st.sidebar.header("Parameters")
@@ -73,19 +58,19 @@ n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, ste
 
 symbols = ['BTC/USD']
 timeframe = '1h'
-limit = 200  # Reduced for reliability
+limit = 50  # Reduced further
 df = fetch_kraken_data(symbols, timeframe, limit)
 
 if df is None or df.empty or len(df) < 10:
-    st.error("No valid data fetched. Check Kraken API or try again later.")
+    st.error("No valid data fetched from Kraken. Check API status or try again later.")
     st.stop()
 
 prices = df['close'].values
 times = (df['timestamp'] - df['timestamp'].iloc[0]) / (1000 * 3600)
 
-# Validate times
-if len(times) < 2 or not np.all(np.isfinite(times)):
-    st.error(f"Invalid timestamp data: {len(times)} points, {times[:5] if len(times) > 0 else []}")
+# Validate data
+if len(times) < 2 or not np.all(np.isfinite(times)) or not np.all(np.isfinite(prices)):
+    st.error(f"Invalid data: times={len(times)} points, prices={len(prices)} points, times_sample={times[:5] if len(times) > 0 else []}")
     st.stop()
 
 # GARCH volatility
@@ -108,11 +93,25 @@ T = times[-1]
 N = len(prices)
 mu = np.mean(returns) * N / T / 100 if len(returns) > 0 else 0.0
 
-# Simulate paths
+# Simulate price paths (pure NumPy)
+def simulate_paths(p0, mu, sigma, T, N, n_paths):
+    dt = T / N
+    t = np.linspace(0, T, N)
+    paths = np.zeros((n_paths, N))
+    paths[:, 0] = p0
+    dW = np.random.normal(0, np.sqrt(dt), (n_paths, N - 1))
+    for j in range(1, N):
+        paths[:, j] = paths[:, j-1] + mu * dt + sigma[j-1] * dW[:, j-1]
+    return paths, t
+
 with st.spinner("Simulating price paths..."):
     paths, t = simulate_paths(p0, mu, sigma, T, N, n_paths)
 
 # Compute density
+def compute_density(paths, n_bins):
+    hist, bins = np.histogram(paths.ravel(), bins=n_bins, density=True)
+    return hist, bins
+
 hist, bins = compute_density(paths, n_bins)
 bin_centers = (bins[:-1] + bins[1:]) / 2
 density = hist / hist.max()
@@ -126,7 +125,7 @@ try:
     metric = VolatilityMetric(sigma, t, T)
     geodesic = metric.geodesic(
         initial_point=np.array([0.0, p0]),
-        initial_tangent_vec=np.array([1.0, mu * 0.01])  # Further adjusted
+        initial_tangent_vec=np.array([1.0, mu * 0.001])
     )
     n_points = N
     geodesic_points = geodesic(np.linspace(0, 1, n_points))
