@@ -1,0 +1,9 @@
+ccxt
+numpy
+pandas
+altair
+cython
+scipy
+arch
+streamlit
+geomstats
