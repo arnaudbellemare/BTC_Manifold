@@ -10,3 +10,4 @@ geomstats
 matplotlib
 mpi4py
 plotly
+numba
