@@ -114,12 +114,12 @@ def fetch_and_process_data(symbols=['BTC/USD', 'ETH/USD'], timeframe='1h', days=
     df_merged.dropna(inplace=True)
     return df_merged
 
-# --- NEW: S/R Analysis from Path Distribution ---
+# --- S/R Analysis from Path Distribution ---
 def analyze_path_distribution(final_prices, asset_name):
     """
     Analyzes the distribution of final prices from a Monte Carlo simulation
     to find support and resistance levels.
-    This replaces the 1D Fokker-Planck solver with a more robust method.
+    Returns support and resistance levels for use in visualization.
     """
     st.subheader(f"Support & Resistance Analysis for {asset_name}")
 
@@ -171,6 +171,7 @@ def analyze_path_distribution(final_prices, asset_name):
     st.write("**Resistance Levels:**")
     st.dataframe(r_df.style.format({'Level': '${:,.2f}'}))
 
+    return support_levels, resistance_levels
 
 # --- Main App Logic ---
 st.sidebar.header("Model Parameters")
@@ -256,7 +257,7 @@ if df is not None:
     ))
     
     # Projected Paths
-    proj_times = pd.to_datetime(aligned_prices.index[-1]) + pd.to_timedelta(np.arange(num_steps) * dt, 'h')
+    proj_times = pd.to_datetime(aligned_prices.index[-1]) + pd.Timedelta(hours=dt) * np.arange(num_steps)
     for i in range(min(n_paths, 100)): # Display a subset of paths
         fig.add_trace(go.Scatter3d(
             x=proj_times, y=paths[i, :, 0], z=paths[i, :, 1],
@@ -270,12 +271,102 @@ if df is not None:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # Display S/R Analysis using the new robust method
+    # Display S/R Analysis and collect levels
     col1, col2 = st.columns(2)
     with col1:
-        analyze_path_distribution(paths[:, -1, 0], 'BTC')
+        btc_support_levels, btc_resistance_levels = analyze_path_distribution(paths[:, -1, 0], 'BTC')
     with col2:
-        analyze_path_distribution(paths[:, -1, 1], 'ETH')
+        eth_support_levels, eth_resistance_levels = analyze_path_distribution(paths[:, -1, 1], 'ETH')
+
+    # --- NEW: Price Graph with Support/Resistance Grid ---
+    st.header("Price with Support and Resistance Grid")
+    col1, col2 = st.columns(2)
+
+    # BTC Price with S/R Grid
+    with col1:
+        st.subheader("BTC Price with Support/Resistance Grid")
+        fig_btc = go.Figure()
+        
+        # Historical Price
+        fig_btc.add_trace(go.Scatter(
+            x=aligned_prices.index,
+            y=aligned_prices['BTC_close'],
+            mode='lines',
+            line=dict(color='blue', width=2),
+            name='BTC Price'
+        ))
+
+        # Support Levels (Green, Dashed, Transparent)
+        for level in btc_support_levels:
+            fig_btc.add_hline(
+                y=level,
+                line=dict(color='rgba(0, 255, 0, 0.3)', dash='dash', width=1),
+                annotation_text=f'S: ${level:,.2f}',
+                annotation_position='top left',
+                annotation_font=dict(color='green')
+            )
+
+        # Resistance Levels (Red, Dashed, Transparent)
+        for level in btc_resistance_levels:
+            fig_btc.add_hline(
+                y=level,
+                line=dict(color='rgba(255, 0, 0, 0.3)', dash='dash', width=1),
+                annotation_text=f'R: ${level:,.2f}',
+                annotation_position='bottom left',
+                annotation_font=dict(color='red')
+            )
+
+        fig_btc.update_layout(
+            title='BTC Price with Support (Green) and Resistance (Red) Levels',
+            xaxis_title='Time',
+            yaxis_title='Price (USD)',
+            showlegend=True,
+            margin=dict(l=20, r=20, t=50, b=20)
+        )
+        st.plotly_chart(fig_btc, use_container_width=True)
+
+    # ETH Price with S/R Grid
+    with col2:
+        st.subheader("ETH Price with Support/Resistance Grid")
+        fig_eth = go.Figure()
+        
+        # Historical Price
+        fig_eth.add_trace(go.Scatter(
+            x=aligned_prices.index,
+            y=aligned_prices['ETH_close'],
+            mode='lines',
+            line=dict(color='blue', width=2),
+            name='ETH Price'
+        ))
+
+        # Support Levels (Green, Dashed, Transparent)
+        for level in eth_support_levels:
+            fig_eth.add_hline(
+                y=level,
+                line=dict(color='rgba(0, 255, 0, 0.3)', dash='dash', width=1),
+                annotation_text=f'S: ${level:,.2f}',
+                annotation_position='top left',
+                annotation_font=dict(color='green')
+            )
+
+        # Resistance Levels (Red, Dashed, Transparent)
+        for level in eth_resistance_levels:
+            fig_eth.add_hline(
+                y=level,
+                line=dict(color='rgba(255, 0, 0, 0.3)', dash='dash', width=1),
+                annotation_text=f'R: ${level:,.2f}',
+                annotation_position='bottom left',
+                annotation_font=dict(color='red')
+            )
+
+        fig_eth.update_layout(
+            title='ETH Price with Support (Green) and Resistance (Red) Levels',
+            xaxis_title='Time',
+            yaxis_title='Price (USD)',
+            showlegend=True,
+            margin=dict(l=20, r=20, t=50, b=20)
+        )
+        st.plotly_chart(fig_eth, use_container_width=True)
 
 else:
     st.error("Failed to load data. Please check connection or try again later.")
