@@ -2,7 +2,7 @@ import streamlit as st
 import ccxt
 import numpy as np
 import pandas as pd
-import altair as alt
+import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
@@ -22,7 +22,7 @@ class VolatilityMetric(RiemannianMetric):
         self.sigma = sigma
         self.t = t
         self.T = T
-        self.exp_solver = ExpSolver()  # Use correct solver
+        self.exp_solver = ExpSolver()
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
@@ -171,44 +171,20 @@ except Exception as e:
     st.error(f"Geodesic computation failed: {e}")
     st.stop()
 
-# DataFrames
-path_data = []
+# Matplotlib plot (inspired by Hypersphere tutorial)
+fig, ax = plt.subplots(figsize=(10, 6))
+# Plot simulated paths
 for i in range(min(n_paths, n_display_paths)):
-    for j in range(N):
-        path_data.append({"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"})
-path_df = pd.DataFrame(path_data)
+    ax.plot(t, paths[i], color="grey", alpha=0.2, label="Simulated Paths" if i == 0 else None)
+# Plot geodesic
+ax.plot(geodesic_df["Time"], geodesic_df["Price"], color="red", linewidth=2, label="Geodesic")
+# Plot support/resistance levels
+for i, sr in enumerate(support_resistance):
+    ax.axhline(y=sr, color="green", linestyle="--", label=f"Level {i}" if i < 2 else None)
+ax.set_xlabel("Time (hours)")
+ax.set_ylabel("BTC/USD Price")
+ax.set_title("BTC/USD Price Paths, Geodesic, and K-Means Support/Resistance Levels")
+ax.legend()
+st.pyplot(fig)
 
-sr_data = [{"Price": sr, "Level": f"Level_{i}"} for i, sr in enumerate(support_resistance)]
-sr_df = pd.DataFrame(sr_data)
-
-plot_df = pd.concat([path_df, geodesic_df])
-
-# Altair chart
-base = alt.Chart(plot_df).encode(
-    x=alt.X("Time:Q", title="Time (hours)"),
-    y=alt.Y("Price:Q", title="BTC/USD Price"),
-    color=alt.Color("Path:N", legend=None)
-)
-
-paths = base.mark_line(opacity=0.05).transform_filter(
-    alt.datum.Path != "Geodesic"
-)
-
-geodesic = base.mark_line(strokeWidth=3, color="red").transform_filter(
-    alt.datum.Path == "Geodesic"
-)
-
-sr_lines = alt.Chart(sr_df).mark_rule(
-    strokeDash=[5, 5], color="green", strokeWidth=2
-).encode(
-    y="Price:Q"
-)
-
-chart = (paths + geodesic + sr_lines).properties(
-    title="BTC/USD Price Paths, Geodesic, and K-Means Support/Resistance Levels",
-    width=800,
-    height=400
-)
-
-st.altair_chart(chart, use_container_width=True)
 st.write("**K-Means Support/Resistance Levels:**", support_resistance)
