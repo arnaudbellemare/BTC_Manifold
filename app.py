@@ -33,31 +33,31 @@ def fetch_kraken_data(symbols, timeframe, limit):
     try:
         markets = exchange.load_markets()
         available_symbols = list(markets.keys())
-        st.write(f"Available Kraken symbols: {available_symbols[:20]}... (total {len(available_symbols)})")
+        st.write(f"Available Kraken symbols: {available_symbols[:30]}... (total {len(available_symbols)})")
     except Exception as e:
         st.warning(f"Failed to load Kraken markets: {e}")
         available_symbols = []
     
-    since = int((time.time() - limit * 3600 * 2) * 1000)  # Double the time range
-    st.write(f"Fetching data: since={pd.to_datetime(since, unit='ms')}, limit={limit}")
+    since = int((time.time() - 7 * 24 * 3600) * 1000)  # Last 7 days
+    st.write(f"Fetching data: since={pd.to_datetime(since, unit='ms')}, limit={limit}, timeframe={timeframe}")
     for symbol in symbols:
         if symbol not in available_symbols:
             st.warning(f"Symbol {symbol} not in Kraken markets")
             continue
-        for attempt in range(10):  # Increased retries
+        for attempt in range(10):  # 10 retries
             try:
                 ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-                if len(df) >= 10 and df['timestamp'].notnull().all() and df['close'].notnull().all():
+                if len(df) >= 10 and df['timestamp'].notnull().all() and df['close'].notnull().all() and df['close'].gt(0).all():
                     st.write(f"Success: Fetched {len(df)} data points for {symbol} (attempt {attempt+1})")
-                    st.write(f"Sample timestamps: {df['datetime'].head().to_list()}")
+                    st.write(f"Sample data: timestamps={df['datetime'].head(3).to_list()}, prices={df['close'].head(3).to_list()}")
                     return df
                 else:
-                    st.warning(f"Invalid data for {symbol}: {len(df)} points, timestamps_valid={df['timestamp'].notnull().all()}, close_valid={df['close'].notnull().all()} (attempt {attempt+1})")
+                    st.warning(f"Invalid data for {symbol}: len={len(df)}, timestamps_valid={df['timestamp'].notnull().all()}, close_valid={df['close'].notnull().all()}, close_positive={df['close'].gt(0).all()} (attempt {attempt+1})")
             except ccxt.NetworkError as e:
                 st.warning(f"Network error for {symbol} (attempt {attempt+1}): {e}")
-                time.sleep(10)  # Increased delay
+                time.sleep(15)  # Increased delay
             except Exception as e:
                 st.warning(f"Error for {symbol} (attempt {attempt+1}): {e}")
     st.error("Failed to fetch valid data from Kraken after trying all symbols")
@@ -65,25 +65,25 @@ def fetch_kraken_data(symbols, timeframe, limit):
 
 # Parameters
 st.sidebar.header("Parameters")
-n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 200, step=50)
+n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 100, step=50)  # Reduced default
 n_bins = st.sidebar.slider("Number of Bins for Density", 20, 100, 50, step=5)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
 
-symbols = ['BTC/USD']  # Prioritize BTC/USD
+symbols = ['BTC/USD']
 timeframe = '1h'
-limit = 20  # Reduced further
+limit = 10  # Reduced further
 df = fetch_kraken_data(symbols, timeframe, limit)
 
 if df is None or df.empty or len(df) < 10:
-    st.error("No valid data fetched from Kraken. Check API status or symbols.")
+    st.error("No valid data fetched from Kraken. Check API status or symbols at https://api.kraken.com/0/public/AssetPairs")
     st.stop()
 
 prices = df['close'].values
 times = (df['timestamp'] - df['timestamp'].iloc[0]) / (1000 * 3600)
 
 # Validate data
-if len(times) < 2 or not np.all(np.isfinite(times)) or not np.all(np.isfinite(prices)):
-    st.error(f"Invalid data: times={len(times)} points, prices={len(prices)} points, times_sample={times[:5] if len(times) > 0 else []}")
+if len(times) < 2 or not np.all(np.isfinite(times)) or not np.all(np.isfinite(prices)) or not np.all(prices > 0):
+    st.error(f"Invalid data: times={len(times)} points, prices={len(prices)} points, times_finite={np.all(np.isfinite(times))}, prices_finite={np.all(np.isfinite(prices))}, prices_positive={np.all(prices > 0)}, times_sample={times[:5] if len(times) > 0 else []}")
     st.stop()
 
 # GARCH volatility
