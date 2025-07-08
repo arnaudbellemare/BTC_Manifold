@@ -6,6 +6,8 @@ import altair as alt
 from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
+# Add this line with your other imports
+from geomstats.geometry.euclidean import Euclidean
 import warnings
 import time
 warnings.filterwarnings("ignore")
@@ -15,17 +17,24 @@ st.title("BTC/USD Price Analysis on Riemannian Manifold")
 # Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        super().__init__(2)
+        # 1. Define the manifold (a 2D Euclidean space)
+        space = Euclidean(dim=2)
+        # 2. Pass the MANIFOLD OBJECT to the parent class constructor
+        super().__init__(space=space)
         self.sigma = sigma
         self.t = t
         self.T = T
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
-        # Ensure index is within bounds of the sigma array
-        idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
+        
+        # Defensive check to prevent division by zero if T is 0
+        if self.T == 0:
+            idx = 0
+        else:
+            idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
+            
         return np.diag([1.0, self.sigma[idx]**2])
-
 # Fetch Kraken data
 @st.cache_data
 def fetch_kraken_data(symbols, timeframe, limit):
