@@ -37,13 +37,12 @@ class VolatilityMetric(RiemannianMetric):
         super().__init__(space=space)
         self.sigma = sigma
         self.t = t
-        self.T = max(T, 1e-6)  # Prevent division by zero
-        # Interpolate sigma for smoother derivatives
+        self.T = max(T, 1e-6)
         self.sigma_interp = interp1d(t, sigma, bounds_error=False, fill_value=(sigma[0], sigma[-1]))
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
-        sigma_val = max(self.sigma_interp(t_val), 1e-6)  # Ensure positive definiteness
+        sigma_val = max(self.sigma_interp(t_val), 1e-6)
         return np.diag([1.0, sigma_val**2])
 
     def christoffel_symbols(self, base_point):
@@ -63,7 +62,7 @@ class VolatilityMetric(RiemannianMetric):
 def fetch_kraken_data(symbol, timeframe, start_date, end_date):
     exchange = ccxt.kraken()
     since = int(start_date.timestamp() * 1000)
-    timeframe_seconds = 3600  # 1h timeframe
+    timeframe_seconds = 3600
     all_ohlcv = []
     max_retries = 3
     
@@ -188,12 +187,12 @@ n_display_paths = st.sidebar.slider(
     help="Number of simulated paths to show in the main chart. Fewer paths improve visualization performance."
 )
 epsilon_factor = st.sidebar.slider(
-    "Probability Range Factor", 0.05, 1.0, 0.25, step=0.05, 
+    "Probability Range Factor", 0.1, 2.0, 0.5, step=0.05, 
     help="Controls the width of S/R probability zones. Smaller values create tighter zones; larger values capture more probability."
 )
 reset_button = st.sidebar.button("Reset to Defaults")
 if reset_button:
-    days_history, n_paths, n_display_paths, epsilon_factor = 30, 2000, 50, 0.25
+    days_history, n_paths, n_display_paths, epsilon_factor = 30, 2000, 50, 0.5
 
 end_date = pd.Timestamp.now(tz='UTC')
 start_date = end_date - pd.Timedelta(days=days_history)
@@ -226,39 +225,60 @@ if df is not None and len(df) > 10:
     with col1:
         # --- Main Chart ---
         final_prices = paths[:, -1]
-        kde = gaussian_kde(final_prices)
+        price_std = np.std(final_prices)
+        price_mean = np.mean(final_prices)
+        kde = gaussian_kde(final_prices, bw_method='scott')
+        kde.set_bandwidth(bw_method=kde.factor * (1.5 if price_std / price_mean < 0.02 else 1.0))  # Adaptive bandwidth
         price_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
         u = kde(price_grid)
-        u /= np.trapz(u, price_grid) + 1e-10  # Ensure normalization
-        # Dynamic peak detection
+        u /= np.trapz(u, price_grid) + 1e-10
         peak_height = 0.05 * u.max()
-        peak_distance = max(10, len(price_grid) // (25 + int(np.std(final_prices) / np.mean(final_prices) * 10)))
+        peak_distance = max(5, len(price_grid) // (30 + int(price_std / price_mean * 15)))
         peaks, _ = find_peaks(u, height=peak_height, distance=peak_distance)
+        if len(peaks) < 4:
+            peaks, _ = find_peaks(u, height=0.01 * u.max(), distance=peak_distance // 2)
         levels = price_grid[peaks]
 
         warning_message = None
         if len(levels) < 4:
-            warning_message = "Few distinct peaks found. Using clustering for S/R grid."
-            X = final_prices.reshape(-1, 1)
-            db = DBSCAN(eps=np.std(final_prices) * 0.1, min_samples=n_paths//100).fit(X)
-            labels = db.labels_
-            cluster_centers = [np.mean(X[labels == i]) for i in set(labels) if i != -1]
+            warning_message = "Insufficient peaks detected. Using clustering to identify S/R levels."
+            q1, q3 = np.percentile(final_prices, [25, 75])
+            iqr = q3 - q1
+            mask = (final_prices >= q1 - 2 * iqr) & (final_prices <= q3 + 2 * iqr)
+            X = final_prices[mask].reshape(-1, 1)
+            eps_values = [price_std * f for f in [0.03, 0.1, 0.3]] if price_std > price_mean * 0.01 else [price_std * 0.5]
+            min_samples = max(3, n_paths // 500)
+            cluster_centers = []
+            for eps in eps_values:
+                db = DBSCAN(eps=eps, min_samples=min_samples).fit(X)
+                labels = db.labels_
+                centers = [np.mean(X[labels == i]) for i in set(labels) if i != -1]
+                if len(centers) >= 2:
+                    cluster_centers = centers
+                    break
             if len(cluster_centers) >= 2:
                 levels = np.sort(cluster_centers)
             else:
-                warning_message += " Clustering failed. Using quantiles as final fallback."
-                levels = np.quantile(final_prices, [0.15, 0.40, 0.60, 0.85])
+                warning_message += " Clustering failed. Supplementing with quantiles to ensure multiple S/R levels."
+                quantiles = np.quantile(final_prices, [0.15, 0.35, 0.65, 0.85])
+                levels = np.unique(np.concatenate([levels, quantiles]))[:6]  # Limit to 6 levels
 
+        # Ensure at least two support and two resistance levels
         median_of_peaks = np.median(levels)
         support_levels = levels[levels <= median_of_peaks]
         resistance_levels = levels[levels > median_of_peaks]
-        if len(resistance_levels) == 0 and len(support_levels) > 1:
-            resistance_levels = np.array([support_levels[-1]])
-            support_levels = support_levels[:-1]
-        if len(support_levels) == 0 and len(resistance_levels) > 1:
-            support_levels = np.array([resistance_levels[0]])
-            resistance_levels = resistance_levels[1:]
-        
+        if len(support_levels) < 2 and len(levels) >= 4:
+            support_levels = levels[np.argsort(levels)[:2]]  # Take lowest two
+            resistance_levels = levels[np.argsort(levels)[2:]]
+        elif len(resistance_levels) < 2 and len(levels) >= 4:
+            resistance_levels = levels[np.argsort(levels)[-2:]]  # Take highest two
+            support_levels = levels[np.argsort(levels)[:-2]]
+        elif len(levels) < 4:
+            quantiles = np.quantile(final_prices, [0.15, 0.35, 0.65, 0.85])
+            levels = np.unique(np.concatenate([levels, quantiles]))[:4]
+            support_levels = levels[:2]
+            resistance_levels = levels[2:]
+
         with st.spinner("Computing geodesic path..."):
             delta_p = prices[-1] - p0
             recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
@@ -296,14 +316,13 @@ if df is not None and len(df) > 10:
         metric = VolatilityMetric(sigma, t, T)
         def get_hit_prob(level_list):
             probs = []
-            total_prob = 0
+            total_prob = np.trapz(u, price_grid)  # Normalize over entire distribution
             for level in level_list:
                 mask = (price_grid >= level - epsilon) & (price_grid <= level + epsilon)
                 raw_prob = np.trapz(u[mask], price_grid[mask])
                 volume_element = np.sqrt(max(np.abs(np.linalg.det(metric.metric_matrix([T, level]))), 1e-6))
                 prob = raw_prob * volume_element
                 probs.append(prob)
-                total_prob += prob
             return [p / (total_prob + 1e-10) for p in probs] if total_prob > 0 else [0] * len(level_list)
         
         support_probs = get_hit_prob(support_levels)
@@ -329,7 +348,7 @@ if df is not None and len(df) > 10:
             Adjust the 'Probability Range Factor' in the sidebar to control the width of S/R zones.  
             - Smaller values create tighter, more precise zones.  
             - Larger values capture more probability but may overlap.  
-            **Recommended range: 0.2–0.5.** Watch how the shaded areas respond below.
+            **Recommended range: 0.3–0.7.** Watch how the shaded areas respond below.
             """)
             interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon)
             st.plotly_chart(interactive_density_fig, use_container_width=True)
