@@ -28,7 +28,8 @@ class VolatilityMetric(RiemannianMetric):
     def metric_matrix(self, base_point):
         t_val = base_point[0]
         idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
-        return np.diag([1.0, self.sigma[idx]**2])
+        sigma_val = max(self.sigma[idx], 0.01)  # Prevent zero volatility
+        return np.diag([1.0, sigma_val**2])
 
 # Fetch Kraken data
 @st.cache_data
@@ -68,16 +69,23 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
             except Exception as e:
                 st.warning(f"Error for {symbol} (attempt {attempt+1}): {e}")
     st.error("Failed to fetch valid data from Kraken. Check API at https://api.kraken.com/0/public/AssetPairs")
-    return None
+    # Fallback: Simulated data
+    st.warning("Using fallback simulated data.")
+    t = np.linspace(0, 168, 168)  # 7 days in hours
+    p0 = 108000  # Approx BTC price based on web data
+    prices = p0 + np.cumsum(np.random.normal(0, 1000, 168))
+    df = pd.DataFrame({"timestamp": (t * 3600 * 1000).astype(int), "close": prices})
+    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
 
 # Parameters
 st.sidebar.header("Parameters")
 n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 100, step=50)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
-epsilon = st.sidebar.slider("Probability Integration Range ($)", 50, 500, 100, step=50)
+epsilon = st.sidebar.slider("Probability Integration Range ($)", 50, 500, 200, step=50)
 
 # Fetch data for July 1-7, 2025
-symbols = ['BTC/USD']
+symbols = ['XBT/USD', 'BTC/USD', 'BTCUSDT', 'XBTUSDT']
 timeframe = '1h'
 limit = 168  # 7 days * 24 hours
 start_date = pd.to_datetime("2025-07-01")
@@ -102,7 +110,7 @@ if len(times) < 2 or not np.all(np.isfinite(times)) or not np.all(np.isfinite(pr
 
 # GARCH volatility
 returns = 100 * np.diff(prices) / prices[:-1]
-sigma = np.array([0.02] * len(prices))  # Fallback (2% volatility, scaled for BTC prices)
+sigma = np.array([0.02] * len(prices))  # Fallback (2% volatility, scaled for BTC)
 if len(returns) > 5:
     try:
         model = arch_model(returns, vol='Garch', p=1, q=1, rescale=False)
@@ -139,19 +147,20 @@ def fokker_planck(t, u, sigma, mu, prices, dp):
     d2u = np.zeros_like(u)
     du = np.zeros_like(u)
     price_mid = prices[1:-1] if len(prices) > 2 else prices
-    d2u[1:-1] = (u[2:] - 2*u[1:-1] + u[:-2]) / dp**2
-    du[1:-1] = (u[2:] - u[:-2]) / (2 * dp)
+    if len(u) > 2:
+        d2u[1:-1] = (u[2:] - 2 * u[1:-1] + u[:-2]) / dp**2
+        du[1:-1] = (u[2:] - u[:-2]) / (2 * dp)
     result = np.zeros_like(u)
     result[1:-1] = 0.5 * (sigma_t * price_mid)**2 * d2u[1:-1] - mu * price_mid * du[1:-1]
     return result
 
 # Discretize price space
-price_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, 100)
+price_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, 200)  # Finer grid
 dp = price_grid[1] - price_grid[0]
 # Use price-scaled standard deviation for initial Gaussian
 sigma_init = 0.01 * p0  # 1% of initial price
 u0 = np.exp(-((price_grid - p0)**2) / (2 * sigma_init**2))
-u0 = np.clip(u0, 0, 1e10)  # Prevent overflow
+u0 = np.clip(u0, 1e-10, 1e10)  # Prevent overflow/underflow
 u0 /= np.trapz(u0, price_grid)  # Normalize
 
 # Solve Fokker-Planck
@@ -162,21 +171,24 @@ with st.spinner("Solving Fokker-Planck equation..."):
             [0, T],
             u0,
             method='RK45',
-            t_eval=np.linspace(0, T, 10),
+            t_eval=np.linspace(0, T, 50),  # Finer time steps
             args=(sigma, mu, price_grid, dp),
             rtol=1e-3,
             atol=1e-6
         )
         u = sol.y[:, -1]
-        u = np.clip(u, 0, 1e10)  # Prevent overflow
+        u = np.clip(u, 1e-10, 1e10)  # Prevent overflow/underflow
         u /= np.trapz(u, price_grid)  # Normalize
+        st.write("Fokker-Planck solution shape:", u.shape, "Sample:", u[:5])
     except Exception as e:
         st.error(f"Fokker-Planck solver failed: {e}. Using fallback density.")
         u = np.exp(-((price_grid - p0)**2) / (2 * (sigma_init * 2)**2))
+        u = np.clip(u, 1e-10, 1e10)
         u /= np.trapz(u, price_grid)
+        st.write("Fallback density shape:", u.shape, "Sample:", u[:5])
 
 # Identify support/resistance levels
-peaks, _ = find_peaks(u, height=0.1 * u.max())
+peaks, _ = find_peaks(u, height=0.1 * u.max(), distance=10)
 support_resistance = price_grid[peaks]
 if len(support_resistance) == 0:
     st.warning("No significant peaks found. Using price grid quantiles.")
@@ -184,11 +196,22 @@ if len(support_resistance) == 0:
 
 # Compute hit probabilities
 probs = []
+total_prob = 0.0
 metric = VolatilityMetric(sigma, t, T)
 for sr in support_resistance:
     mask = (price_grid >= sr - epsilon) & (price_grid <= sr + epsilon)
-    prob = np.trapz(u[mask], price_grid[mask]) * np.sqrt(np.linalg.det(metric.metric_matrix([T, sr])))
-    probs.append(prob)
+    if np.any(mask):
+        prob = np.trapz(u[mask], price_grid[mask]) * np.sqrt(np.linalg.det(metric.metric_matrix([T, sr])))
+        probs.append(prob)
+        total_prob += prob
+    else:
+        probs.append(0.0)
+
+# Normalize probabilities
+if total_prob > 0:
+    probs = [p / total_prob for p in probs]
+else:
+    probs = [1.0 / len(support_resistance)] * len(support_resistance)  # Uniform if zero
 
 # Geodesic
 try:
@@ -217,13 +240,19 @@ for i in range(min(n_paths, n_display_paths)):
     for j in range(N):
         path_data.append({"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"})
 path_df = pd.DataFrame(path_data)
+if path_df.empty:
+    st.error("Path data is empty. Check simulation.")
+    st.stop()
 plot_df = pd.concat([path_df, geodesic_df])
+if plot_df.empty:
+    st.error("Plot data is empty. Check geodesic or paths.")
+    st.stop()
 sr_df = pd.DataFrame({"Price": support_resistance, "Level": [f"Level_{i}" for i in range(len(support_resistance))]})
 
 # Altair chart
 base = alt.Chart(plot_df).encode(
     x=alt.X("Time:Q", title="Time (hours)", scale=alt.Scale(domain=[0, T])),
-    y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(domain=[min(prices) * 0.95, max(prices) * 1.05])),
+    y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(domain=[min(plot_df["Price"]) * 0.95, max(plot_df["Price"]) * 1.05])),
     color=alt.Color("Path:N", legend=None)
 )
 
