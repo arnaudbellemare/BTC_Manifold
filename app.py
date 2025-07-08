@@ -76,7 +76,7 @@ n_clusters = st.sidebar.slider("Number of K-Means Clusters", 2, 5, 3, step=1)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
 
 # Fetch data for July 1-7, 2025
-symbols = ['XBT/USD', 'BTC/USD', 'BTCUSDT', 'XBTUSDT']
+symbols = ['BTC/USD']
 timeframe = '1h'
 limit = 168  # 7 days * 24 hours
 start_date = pd.to_datetime("2025-07-01")
