@@ -19,7 +19,6 @@ st.title("BTC/USD Price Analysis on a Volatility-Weighted Manifold")
 # Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        # The definitive compatibility fix for old geomstats versions
         self.dim = 2
         self.sigma = sigma
         self.t = t
@@ -68,23 +67,23 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
     sim_prices = 70000 + np.cumsum(np.random.normal(0, 500, 168))
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'timestamp': sim_t.astype(np.int64) // 10**6})
 
-# --- NEW: Function to visualize the manifold's geometry ---
-def visualize_manifold(metric, t_grid, p_grid):
+# --- CORRECTED: Function to visualize the manifold's geometry ---
+def visualize_manifold(metric, t_grid, p_domain):
     st.subheader("Visualizing the Market Manifold")
     st.write("This heatmap shows the 'cost' of price movement (technically, the `g_pp` component of the metric tensor) over time. Yellow areas represent high volatility, where the manifold is 'stretched' and price movement is difficult. Dark areas are low-volatility regions where price movement is easier.")
     
-    g_pp_values = []
-    for t_val in t_grid:
-        for p_val in p_grid:
-            g = metric.metric_matrix([t_val, p_val])
-            g_pp_values.append({'Time': t_val, 'Price': p_val, 'Cost': g[1, 1]})
+    # 1. Calculate the cost at each time step
+    costs = [metric.metric_matrix([t_val, 0])[1, 1] for t_val in t_grid]
+    min_cost, max_cost = min(costs), max(costs)
+
+    # 2. Create a DataFrame for the heatmap background
+    heatmap_df = pd.DataFrame({'Time': t_grid, 'Cost': costs})
     
-    g_df = pd.DataFrame(g_pp_values)
-    
-    heatmap = alt.Chart(g_df).mark_rect().encode(
-        x='Time:Q',
-        y=alt.Y('Price:Q', scale=alt.Scale(zero=False)),
-        color=alt.Color('Cost:Q', scale=alt.Scale(scheme='viridis'), legend=alt.Legend(title="Price Movement 'Cost'"))
+    heatmap = alt.Chart(heatmap_df).mark_rect().encode(
+        x=alt.X('Time:Q', title="Time"),
+        color=alt.Color('Cost:Q', 
+                        scale=alt.Scale(scheme='viridis', domain=[min_cost, max_cost]), 
+                        legend=alt.Legend(title="Price Movement 'Cost'"))
     ).properties(
         title="Market Manifold Geometry (g_pp = σ(t)²)",
         width=400,
@@ -117,7 +116,7 @@ if len(returns) > 5:
         sigma = np.pad(sigma, (1, 0), mode='edge')
     except Exception as e: st.warning(f"GARCH failed: {e}. Using constant volatility.")
 
-# --- REMOVED: Price cap from the simulation ---
+# Simulate price paths (unconstrained)
 def simulate_paths(p0, mu, sigma, T, N, n_paths):
     if N == 0: return np.array([[p0]]), np.array([0])
     dt = T / (N - 1) if N > 1 else T
@@ -126,7 +125,7 @@ def simulate_paths(p0, mu, sigma, T, N, n_paths):
     dW = np.random.normal(0, np.sqrt(dt), (n_paths, N))
     for j in range(1, N):
         paths[:, j] = paths[:, j-1] + mu * paths[:, j-1] * dt + sigma[j-1] * paths[:, j-1] * dW[:, j-1]
-        paths[:, j] = np.maximum(paths[:, j], 0) # Ensure no negative prices
+        paths[:, j] = np.maximum(paths[:, j], 0)
     return paths, t
 
 with st.spinner("Simulating price paths (Monte Carlo)..."):
@@ -148,8 +147,7 @@ with col1:
     du, d2u = np.gradient(u, dp), np.gradient(np.gradient(u, dp), dp)
     support_idx = np.where((du > 0) & (d2u < 0) & (u > 0.05 * u.max()))[0]
     resistance_idx = np.where((du < 0) & (d2u > 0) & (u > 0.05 * u.max()))[0]
-    support_levels = price_grid[support_idx]
-    resistance_levels = price_grid[resistance_idx]
+    support_levels, resistance_levels = price_grid[support_idx], price_grid[resistance_idx]
     if len(support_levels) == 0 or len(resistance_levels) == 0:
         st.warning("Insufficient distinct levels. Using density peaks as fallback.")
         peaks, _ = find_peaks(u, height=0.1 * u.max(), distance=10)
@@ -198,8 +196,7 @@ with col1:
     # Main Chart
     path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} for i in range(min(n_paths, n_display_paths)) for j in range(N)]
     plot_df = pd.concat([pd.DataFrame(path_data), geodesic_df])
-    support_df = pd.DataFrame({"Price": support_levels})
-    resistance_df = pd.DataFrame({"Price": resistance_levels})
+    support_df, resistance_df = pd.DataFrame({"Price": support_levels}), pd.DataFrame({"Price": resistance_levels})
     base = alt.Chart(plot_df).encode(x=alt.X("Time:Q", title="Time (hours)"), y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False)))
     path_lines = base.mark_line(opacity=0.2).encode(color=alt.value('gray'), detail='Path:N').transform_filter(alt.datum.Path != "Geodesic")
     geodesic = base.mark_line(strokeWidth=3, color="red").transform_filter(alt.datum.Path == "Geodesic")
@@ -209,16 +206,14 @@ with col1:
     st.altair_chart(main_chart, use_container_width=True)
 
 with col2:
-    # --- NEW: Display the manifold visualization ---
-    # Create a coarser grid for visualization to speed it up
-    viz_p_grid = np.linspace(plot_df['Price'].min(), plot_df['Price'].max(), 50)
-    manifold_heatmap = visualize_manifold(metric, t, viz_p_grid)
-    
-    # Overlay the actual historical price path
+    # --- DISPLAY THE CORRECTED MANIFOLD VISUALIZATION ---
+    # The price domain for the viz is now taken from the historical data
+    p_domain = [prices.min(), prices.max()]
+    manifold_heatmap = visualize_manifold(metric, t, p_domain)
     history_df = pd.DataFrame({'Time': times, 'Price': prices})
     history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2.5, opacity=0.8).encode(x='Time:Q', y='Price:Q')
     
-    st.altair_chart((manifold_heatmap + history_line).interactive(), use_container_width=True)
+    st.altair_chart((manifold_heatmap + history_line).properties(height=300).interactive(), use_container_width=True)
     
     st.write(f"**Expected Final Price:** ${np.mean(final_prices):,.2f}")
     st.write("**Support Levels (BTC/USD):**")
