@@ -134,7 +134,6 @@ def visualize_manifold(sigma_data, t_grid, history_df):
     ).interactive()
 
     return final_chart
-
 # Parameters
 st.sidebar.header("Parameters")
 n_paths = st.sidebar.slider("Number of Simulated Paths", 500, 5000, 2000, step=100)
