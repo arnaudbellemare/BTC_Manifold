@@ -9,4 +9,4 @@ streamlit
 geomstats
 matplotlib
 mpi4py
-
+plotly
