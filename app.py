@@ -108,7 +108,7 @@ else:
     st.stop()
 
 p0 = prices[0]
-T = times[-1]  # Safe after validation
+T = times.iloc[-1] # Safe after validation
 N = len(prices)
 mu = np.mean(returns) * N / T / 100 if len(returns) > 0 else 0.0
 
