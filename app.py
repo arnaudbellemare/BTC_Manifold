@@ -27,20 +27,26 @@ class VolatilityMetric(RiemannianMetric):
 
 # Fetch Kraken data
 @st.cache_data
-def fetch_kraken_data(symbol, timeframe, limit):
+def fetch_kraken_data(symbols, timeframe, limit):
     exchange = ccxt.kraken()
     since = int((time.time() - limit * 3600) * 1000)  # Last 'limit' hours
-    for symbol_try in [symbol, 'BTC/USD']:  # Fallback symbol
+    for symbol in symbols:
         for _ in range(3):
             try:
-                ohlcv = exchange.fetch_ohlcv(symbol_try, timeframe, since, limit)
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-                if len(df) >= 10:  # Ensure sufficient data
+                if len(df) >= 10 and df['timestamp'].notnull().all():
+                    st.write(f"Fetched {len(df)} data points for {symbol}")
                     return df
-            except ccxt.NetworkError:
+                else:
+                    st.warning(f"Insufficient or invalid data for {symbol}: {len(df)} points")
+            except ccxt.NetworkError as e:
+                st.warning(f"Network error for {symbol}: {e}")
                 time.sleep(3)
-    st.error("Failed to fetch data from Kraken after trying multiple symbols")
+            except Exception as e:
+                st.warning(f"Error for {symbol}: {e}")
+    st.error("Failed to fetch data from Kraken after trying all symbols")
     return None
 
 # Simulate price paths (pure NumPy)
@@ -65,21 +71,21 @@ n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 200, step=50)
 n_bins = st.sidebar.slider("Number of Bins for Density", 20, 100, 50, step=5)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
 
-symbol = 'XXBTZUSD'
+symbols = ['BTC/USD']
 timeframe = '1h'
-limit = 300  # Reduced for reliability
-df = fetch_kraken_data(symbol, timeframe, limit)
+limit = 200  # Reduced for reliability
+df = fetch_kraken_data(symbols, timeframe, limit)
 
 if df is None or df.empty or len(df) < 10:
-    st.error("Insufficient data fetched. Try reducing limit or checking Kraken API status.")
+    st.error("No valid data fetched. Check Kraken API or try again later.")
     st.stop()
 
 prices = df['close'].values
 times = (df['timestamp'] - df['timestamp'].iloc[0]) / (1000 * 3600)
 
-# Ensure times is valid
-if len(times) < 2:
-    st.error("Invalid timestamp data from Kraken")
+# Validate times
+if len(times) < 2 or not np.all(np.isfinite(times)):
+    st.error(f"Invalid timestamp data: {len(times)} points, {times[:5] if len(times) > 0 else []}")
     st.stop()
 
 # GARCH volatility
@@ -120,7 +126,7 @@ try:
     metric = VolatilityMetric(sigma, t, T)
     geodesic = metric.geodesic(
         initial_point=np.array([0.0, p0]),
-        initial_tangent_vec=np.array([1.0, mu * 0.1])  # Adjusted for stability
+        initial_tangent_vec=np.array([1.0, mu * 0.01])  # Further adjusted
     )
     n_points = N
     geodesic_points = geodesic(np.linspace(0, 1, n_points))
