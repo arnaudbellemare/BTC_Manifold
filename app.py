@@ -22,7 +22,8 @@ st.title("BTC/USD Rigorous Riemannian Manifold Analysis (July 1-7, 2025)")
 # Advanced Riemannian metric with full implementations
 class AdvancedRiemannianMetric(RiemannianMetric):
     def __init__(self, sigma, t, T, prices, variances):
-        super().__init__(space=Euclidean(dim=2), default_point_type="vector")
+        # --- FIX: Changed constructor for backward compatibility with older geomstats versions ---
+        super().__init__(dim=2)
         self.sigma = sigma
         self.t = t
         self.T = T
@@ -40,71 +41,45 @@ class AdvancedRiemannianMetric(RiemannianMetric):
         fisher_info = 1.0 / (np.interp(p_val, p_centers, price_dist) + 1e-6)
         return np.array([[1.0, 0.0], [0.0, (sigma_val**2 * var_val + fisher_info)]])
 
-    def christoffel_symbols(self, base_point, epsilon=1e-6):
+    def christoffel_symbols(self, base_point, epsilon=1e-5):
         g_inv = np.linalg.inv(self.metric_matrix(base_point))
         christoffels = np.zeros((2, 2, 2))
         for i in range(2):
             for j in range(2):
                 for k in range(2):
-                    partial_derivatives = np.zeros(2)
+                    # This computes d_k g_ij etc. using central differences
+                    val = 0
                     for l in range(2):
-                        h = np.zeros(2)
-                        h[l] = epsilon
-                        g_plus = self.metric_matrix(base_point + h)
-                        g_minus = self.metric_matrix(base_point - h)
-                        
                         term1_deriv_vec = np.zeros(2); term1_deriv_vec[j] = epsilon
-                        term2_deriv_vec = np.zeros(2); term2_deriv_vec[i] = epsilon
-                        
                         dg_ik_dj = (self.metric_matrix(base_point + term1_deriv_vec)[i,k] - self.metric_matrix(base_point - term1_deriv_vec)[i,k]) / (2*epsilon)
+                        
+                        term2_deriv_vec = np.zeros(2); term2_deriv_vec[i] = epsilon
                         dg_jk_di = (self.metric_matrix(base_point + term2_deriv_vec)[j,k] - self.metric_matrix(base_point - term2_deriv_vec)[j,k]) / (2*epsilon)
                         
                         term3_deriv_vec = np.zeros(2); term3_deriv_vec[k] = epsilon
                         dg_ij_dk = (self.metric_matrix(base_point + term3_deriv_vec)[i,j] - self.metric_matrix(base_point - term3_deriv_vec)[i,j]) / (2*epsilon)
-                        
-                        christoffels[i, j, k] += 0.5 * g_inv[k, l] * (dg_ik_dj + dg_jk_di - dg_ij_dk)
+
+                        val += g_inv[k, l] * 0.5 * (dg_ik_dj + dg_jk_di - dg_ij_dk)
+                    christoffels[i, j, k] = val
         return christoffels
-
-    def ricci_curvature(self, base_point, epsilon=1e-6):
-        christoffels = self.christoffel_symbols(base_point)
-        ricci = np.zeros((2, 2))
-        for i in range(2):
-            for j in range(2):
-                for k in range(2):
-                    h = np.zeros(2); h[k] = epsilon
-                    gamma_plus = self.christoffel_symbols(base_point + h)
-                    gamma_minus = self.christoffel_symbols(base_point - h)
-                    d_gamma_k = (gamma_plus - gamma_minus) / (2 * epsilon)
-                    
-                    term1 = d_gamma_k[i, j, k]
-                    term2 = d_gamma_k[i, k, j]
-                    
-                    term3 = 0
-                    term4 = 0
-                    for l in range(2):
-                        term3 += christoffels[i, j, l] * christoffels[l, k, k]
-                        term4 += christoffels[i, k, l] * christoffels[l, j, k]
-                    
-                    ricci[i, j] += term1 - term2 + term3 - term4
-        return ricci
-
+    
     def log(self, point, base_point):
         point = np.asarray(point)
         base_point = np.asarray(base_point)
         
         def objective(velocity):
-            geodesic = self.exp_solver.solve(velocity, base_point)
-            final_point = geodesic[-1]
+            # Exp map: Shoot a geodesic from base_point with initial velocity
+            geodesic_path = self.exp_solver.solve(velocity, base_point)
+            final_point = geodesic_path[-1]
             return final_point - point
         
+        # Initial guess for velocity is a straight line
         initial_guess = point - base_point
         sol = root(objective, initial_guess, method='hybr', tol=1e-5)
         
         if not sol.success:
-            # Fallback for failed convergence
             warnings.warn("Logarithm map solver did not converge. Returning linear approximation.")
             return point - base_point
-            
         return sol.x
         
 @st.cache_data
@@ -134,12 +109,11 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
     sim_prices = 70000 + np.cumsum(np.random.normal(0, 500, 168))
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'timestamp': sim_t.astype(np.int64) // 10**6})
 
-# Parameters
+# Parameters & Data Prep
 st.sidebar.header("Parameters")
 n_paths = st.sidebar.slider("Number of Simulated Paths", 100, 2000, 1000, step=100)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 10, 200, 50, step=10)
 
-# Fetch and Prepare Data
 df = fetch_kraken_data(['BTC/USD'], '1h', pd.to_datetime("2025-07-01"), pd.to_datetime("2025-07-07 23:59:59"), 168)
 prices = df['close'].values
 times = (df['timestamp'] - df['timestamp'].iloc[0]) / (1000 * 3600)
@@ -147,7 +121,7 @@ T = times.iloc[-1]
 N = len(prices)
 p0 = prices[0]
 returns = np.log(prices[1:] / prices[:-1])
-mu = np.mean(returns) * 24 * 365 # Annualized log-return drift
+mu = np.mean(returns) * 24 * 365
 
 # Volatility Modeling
 v0 = np.var(returns) if len(returns) > 0 else 0.01**2
@@ -197,29 +171,21 @@ for i in range(nt - 1):
     g_p = np.array([metric_fp.metric_matrix([current_time, p]) for p in p_grid])
     g_inv_pp = 1 / g_p[:, 1, 1]
     sqrt_det_g = np.sqrt(g_p[:, 1, 1])
-    
-    # Laplace-Beltrami Operator: Δf = (1/√g) ∂p (√g g^{pp} ∂p f)
     L_LB = D_bwd @ diags(sqrt_det_g * g_inv_pp) @ D_fwd
-    
-    drift_coeff = (mu / (365*24)) * p_grid
-    L_drift = diags(drift_coeff) @ D_fwd # Using forward difference for drift
-    
+    L_drift = diags((mu / (365*24)) * p_grid) @ D_fwd
     L = 0.5 * diags(p_grid**2) @ L_LB + L_drift
-    
     LHS = I - 0.5 * dt_fd * L
     RHS = (I + 0.5 * dt_fd * L) @ u[i, :]
-    
     u[i + 1, :] = spsolve(LHS, RHS)
     u[i + 1, :] = np.maximum(u[i + 1, :], 0)
     norm = np.trapz(u[i + 1, :], p_grid)
     if norm > 1e-9: u[i + 1, :] /= norm
 
+# Identify stable levels from potential minima
 u_density = u[-1, :]
-
-# S/R levels from Effective Potential
-V = -np.log(u_density + 1e-20)
-V -= V.min() # Normalize potential
-potential_minima_idx, _ = find_peaks(-V, distance=int(n_p_steps/20), height=-np.log(0.8))
+V_eff = -np.log(u_density + 1e-20)
+V_eff -= V_eff.min()
+potential_minima_idx, _ = find_peaks(-V_eff, distance=int(n_p_steps/20), height=-np.log(0.8))
 stable_levels = p_grid[potential_minima_idx]
 
 # Geodesic Calculation
@@ -240,13 +206,21 @@ except Exception as e:
     st.error(f"Geodesic computation failed: {e}. Using linear approximation.")
     geodesic_df = pd.DataFrame({"Time": t, "Price": p0 + ((prices[-1] - p0) / T) * t, "Path": "Geodesic"})
 
-# Trending/Reversion Analysis using true geodesic distance
-distances = [metric.dist(np.array([t[i], paths[j,i]]), np.array([geodesic_df["Time"].iloc[i], geodesic_df["Price"].iloc[i]])) for j in range(n_paths) for i in range(N-1, N)]
-distances = np.array(distances)
-trending_threshold = np.percentile(distances, 25)
-reversion_threshold = np.percentile(distances, 75)
-trending_paths = np.sum(distances < trending_threshold)
-reversion_paths = np.sum(distances > reversion_threshold)
+# --- FIX: Corrected Trending/Reversion analysis to use average path distance ---
+avg_distances = []
+for j in range(n_paths):
+    dist_sum = 0
+    for i in range(N):
+        path_point = np.array([t[i], paths[j, i]])
+        geodesic_point = np.array([geodesic_df["Time"].iloc[i], geodesic_df["Price"].iloc[i]])
+        dist_sum += metric.dist(path_point, geodesic_point)
+    avg_distances.append(dist_sum / N)
+
+avg_distances = np.array(avg_distances)
+trending_threshold = np.percentile(avg_distances, 25)
+reversion_threshold = np.percentile(avg_distances, 75)
+trending_paths = np.sum(avg_distances <= trending_threshold)
+reversion_paths = np.sum(avg_distances >= reversion_threshold)
 
 # Visualization
 path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} for i in range(min(n_paths, n_display_paths)) for j in range(N)]
@@ -264,5 +238,5 @@ chart = (path_lines + geodesic_line + level_lines).properties(
 
 st.altair_chart(chart, use_container_width=True)
 st.write(f"**Stable Price Levels (Attractors):** {[f'${x:,.2f}' for x in stable_levels]}")
-st.write(f"**Trending Paths:** {trending_paths} ({trending_paths/n_paths:.1%}) (Paths near the geodesic)")
-st.write(f"**Reversion Paths:** {reversion_paths} ({reversion_paths/n_paths:.1%}) (Paths deviating from the geodesic)")
+st.write(f"**Trending Paths:** {trending_paths} ({trending_paths/n_paths:.1%}) (Paths with low average distance to geodesic)")
+st.write(f"**Reversion Paths:** {reversion_paths} ({reversion_paths/n_paths:.1%}) (Paths with high average distance to geodesic)")
