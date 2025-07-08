@@ -12,6 +12,7 @@ from scipy.integrate import solve_ivp
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
 from scipy.interpolate import interp1d
+from sklearn.cluster import DBSCAN
 import warnings
 from joblib import Parallel, delayed
 import streamlit.components.v1 as components
@@ -234,29 +235,35 @@ if df is not None and len(df) > 10:
         peak_distance = max(10, len(price_grid) // (25 + int(np.std(final_prices) / np.mean(final_prices) * 10)))
         peaks, _ = find_peaks(u, height=peak_height, distance=peak_distance)
         levels = price_grid[peaks]
-        
+
         warning_message = None
         if len(levels) < 4:
-            warning_message = "Few distinct peaks found. Using quantiles for S/R grid due to strong trend or low volatility."
-            support_levels = np.quantile(final_prices, [0.15, 0.40])
-            resistance_levels = np.quantile(final_prices, [0.60, 0.85])
-        else:
-            median_of_peaks = np.median(levels)
-            support_levels = levels[levels <= median_of_peaks]
-            resistance_levels = levels[levels > median_of_peaks]
-            if len(resistance_levels) == 0 and len(support_levels) > 1:
-                resistance_levels = np.array([support_levels[-1]])
-                support_levels = support_levels[:-1]
-            if len(support_levels) == 0 and len(resistance_levels) > 1:
-                support_levels = np.array([resistance_levels[0]])
-                resistance_levels = resistance_levels[1:]
+            warning_message = "Few distinct peaks found. Using clustering for S/R grid."
+            X = final_prices.reshape(-1, 1)
+            db = DBSCAN(eps=np.std(final_prices) * 0.1, min_samples=n_paths//100).fit(X)
+            labels = db.labels_
+            cluster_centers = [np.mean(X[labels == i]) for i in set(labels) if i != -1]
+            if len(cluster_centers) >= 2:
+                levels = np.sort(cluster_centers)
+            else:
+                warning_message += " Clustering failed. Using quantiles as final fallback."
+                levels = np.quantile(final_prices, [0.15, 0.40, 0.60, 0.85])
+
+        median_of_peaks = np.median(levels)
+        support_levels = levels[levels <= median_of_peaks]
+        resistance_levels = levels[levels > median_of_peaks]
+        if len(resistance_levels) == 0 and len(support_levels) > 1:
+            resistance_levels = np.array([support_levels[-1]])
+            support_levels = support_levels[:-1]
+        if len(support_levels) == 0 and len(resistance_levels) > 1:
+            support_levels = np.array([resistance_levels[0]])
+            resistance_levels = resistance_levels[1:]
         
         with st.spinner("Computing geodesic path..."):
             delta_p = prices[-1] - p0
-            # Adaptive initial velocity based on recent trend
             recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
             y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
-            t_eval = np.linspace(0, T, min(N, 100))  # Reduce integration points
+            t_eval = np.linspace(0, T, min(N, 100))
             sol = solve_ivp(geodesic_equation, [0, T], y0, args=(VolatilityMetric(sigma, t, T),), 
                            t_eval=t_eval, rtol=1e-5, method='RK23')
             geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
@@ -345,19 +352,15 @@ if df is not None and len(df) > 10:
     export_button = st.button("Download Charts and Data")
     if export_button:
         with st.spinner("Generating exports..."):
-            # Export main chart as HTML
             chart.save("main_chart.html")
             with open("main_chart.html", "rb") as f:
                 st.download_button("Download Main Chart", f, file_name="main_chart.html")
-            # Export density chart
             interactive_density_fig.write_html("density_chart.html")
             with open("density_chart.html", "rb") as f:
                 st.download_button("Download Density Chart", f, file_name="density_chart.html")
-            # Export volume profile
             volume_profile_fig.write_html("volume_profile.html")
             with open("volume_profile.html", "rb") as f:
                 st.download_button("Download Volume Profile", f, file_name="volume_profile.html")
-            # Export S/R data
             sr_data = pd.concat([
                 pd.DataFrame({'Type': 'Support', 'Level': support_levels, 'Hit %': support_probs}),
                 pd.DataFrame({'Type': 'Resistance', 'Level': resistance_levels, 'Hit %': resistance_probs})
