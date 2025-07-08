@@ -3,11 +3,12 @@ import ccxt
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
 from geomstats.geometry.euclidean import Euclidean
-from geomstats.geometry.base import ExpSolver
+from geomstats.numerics.geodesic import ExpODESolver
+from geomstats.numerics.ivp import ScipySolveIVP
 from geomstats.learning.kmeans import RiemannianKMeans
-from arch import arch_model
 import warnings
 import time
 warnings.filterwarnings("ignore")
@@ -21,7 +22,7 @@ class VolatilityMetric(RiemannianMetric):
         self.sigma = sigma
         self.t = t
         self.T = T
-        self.exp_solver = ExpSolver()
+        self.exp_solver = ExpODESolver(space=Euclidean(dim=2), integrator=ScipySolveIVP())
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
