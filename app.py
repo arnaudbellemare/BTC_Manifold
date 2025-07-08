@@ -199,35 +199,44 @@ df = fetch_and_process_data(days=days_history)
 if df is not None:
     # Debug: Check df structure
     st.write("Debug: df columns:", list(df.columns))
+    st.write("Debug: df shape:", df.shape)
     st.write("Debug: Any NaNs in df[['BTC_close', 'ETH_close']]?", df[['BTC_close', 'ETH_close']].isna().any().to_dict())
 
-    # Calculate returns and covariance
+    # Calculate returns
     returns = df[['BTC_close', 'ETH_close']].pct_change().dropna()
     
     # Debug: Check returns
     st.write("Debug: returns columns:", list(returns.columns))
+    st.write("Debug: returns shape:", returns.shape)
     
-    # Compute rolling covariance
-    cov_series = returns.rolling(window=rolling_window).cov().unstack(level=0)
+    # Compute rolling covariance manually
+    cov_series = pd.DataFrame(index=returns.index, 
+                             columns=['BTC_BTC', 'BTC_ETH', 'ETH_BTC', 'ETH_ETH'])
     
-    # Debug: Safely inspect cov_series structure
-    st.write("Debug: cov_series columns:", list(cov_series.columns))  # Convert to list to avoid pyarrow issue
-    if not cov_series.empty:
-        st.write("Debug: Sample cov_series row:", cov_series.iloc[0].to_dict())  # Convert row to dict
-    else:
-        st.error("cov_series is empty. Check data or rolling window size.")
-        st.stop()
+    for i in range(rolling_window, len(returns)):
+        window = returns.iloc[i-rolling_window:i]
+        if len(window) == rolling_window and not window.isna().any().any():
+            cov_matrix = window.cov().values
+            if cov_matrix.shape == (2, 2):
+                cov_series.iloc[i] = [cov_matrix[0, 0], cov_matrix[0, 1], 
+                                     cov_matrix[1, 0], cov_matrix[1, 1]]
     
-    # Rename columns to ensure correct structure
-    expected_columns = [('BTC_close', 'BTC_close'), ('BTC_close', 'ETH_close'), 
-                        ('ETH_close', 'BTC_close'), ('ETH_close', 'ETH_close')]
-    if not all(col in cov_series.columns for col in expected_columns):
-        st.error(f"Covariance matrix does not contain expected columns. Found: {list(cov_series.columns)}")
-        st.stop()
-    
-    cov_series = cov_series[expected_columns]
-    cov_series.columns = ['BTC_BTC', 'BTC_ETH', 'ETH_BTC', 'ETH_ETH']
     cov_series = cov_series.dropna()
+    
+    # Debug: Inspect cov_series
+    st.write("Debug: cov_series columns:", list(cov_series.columns))
+    st.write("Debug: cov_series shape:", cov_series.shape)
+    if not cov_series.empty:
+        st.write("Debug: Sample cov_series row:", cov_series.iloc[0].to_dict())
+    else:
+        st.error("cov_series is empty. Check rolling window size or data availability.")
+        st.stop()
+
+    # Verify columns
+    expected_columns = ['BTC_BTC', 'BTC_ETH', 'ETH_BTC', 'ETH_ETH']
+    if list(cov_series.columns) != expected_columns:
+        st.error(f"Covariance matrix columns incorrect. Found: {list(cov_series.columns)}")
+        st.stop()
 
     # Calculate inverse covariance (Fisher Metric)
     inv_cov_list = []
@@ -246,6 +255,9 @@ if df is not None:
                                         name=idx))
     inv_cov_series = pd.DataFrame(inv_cov_list)
 
+    # Debug: Check inv_cov_series
+    st.write("Debug: inv_cov_series shape:", inv_cov_series.shape)
+
     # Calculate volume factor
     total_volume = df['BTC_volume'] * df['BTC_close'] + df['ETH_volume'] * df['ETH_close']
     volume_factor = 1 / (1 + total_volume / total_volume.mean())
@@ -256,6 +268,14 @@ if df is not None:
     inv_cov_series = inv_cov_series.loc[common_index]
     volume_factor = volume_factor.loc[common_index]
     aligned_prices = df.loc[common_index, ['BTC_close', 'ETH_close']]
+
+    # Debug: Check aligned data
+    st.write("Debug: aligned_prices shape:", aligned_prices.shape)
+    st.write("Debug: common_index length:", len(common_index))
+
+    if aligned_prices.empty:
+        st.error("Aligned data is empty. Check data alignment or rolling window size.")
+        st.stop()
 
     # Initialize Metric and Geodesic
     metric = FisherVolumeMetric(inv_cov_series, volume_factor)
