@@ -7,3 +7,7 @@ scipy
 arch
 streamlit
 geomstats
+fenics-dolfinx 
+matplotlib
+mpi4py
+
