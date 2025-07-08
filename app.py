@@ -9,6 +9,7 @@ from geomstats.numerics.geodesic import ExpODESolver
 from geomstats.numerics.ivp import ScipySolveIVP
 from scipy.integrate import solve_ivp
 from scipy.optimize import root
+from scipy.stats import gaussian_kde
 from sklearn.cluster import KMeans
 import time
 import warnings
@@ -121,20 +122,29 @@ def simulate_paths_heston(p0, mu, v0, kappa, theta, xi, rho, T, N, n_paths, pric
         z2 = rho * z1 + np.sqrt(1 - rho**2) * np.random.normal(size=n_paths)
         variances[:, j] = np.maximum(variances[:, j-1] + kappa * (theta - variances[:, j-1]) * dt + xi * np.sqrt(variances[:, j-1]) * np.sqrt(dt) * z2, 1e-6)
         paths[:, j] = paths[:, j-1] * np.exp((mu - 0.5 * variances[:, j-1]) * dt + np.sqrt(variances[:, j-1]) * np.sqrt(dt) * z1)
-        # --- FIX: Impose a price ceiling on the simulation ---
         paths[:, j] = np.clip(paths[:, j], 0, price_cap)
     return paths, t, variances
 
-with st.spinner("Simulating Heston paths with price cap..."):
+with st.spinner("Simulating Heston paths (Monte Carlo Fokker-Planck)..."):
     paths, t, variances = simulate_paths_heston(p0, mu / (365*24), v0, kappa, theta, xi, rho, T, N, n_paths)
 
-# K-MEANS CLUSTERING ON MONTE CARLO RESULTS
-final_prices = paths[:, -1]
-expected_price = np.mean(final_prices)
+# --- ROBUST FOKKER-PLANCK SOLUTION VIA KERNEL DENSITY ESTIMATION ---
+# The final positions of the Monte Carlo paths are a direct sample
+# of the solution to the Fokker-Planck equation. We use KDE to get the
+# smooth probability density function from this sample. This is unconditionally stable.
+with st.spinner("Constructing Fokker-Planck solution via KDE..."):
+    final_prices = paths[:, -1]
+    kde = gaussian_kde(final_prices)
+    
+    # Create a grid to evaluate the density on
+    p_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
+    u_density = kde(p_grid)
+    u_density /= np.trapz(u_density, p_grid) # Normalize the integral to 1
 
+# --- K-MEANS CLUSTERING ON MONTE CARLO RESULTS ---
+expected_price = np.mean(final_prices)
 kmeans = KMeans(n_clusters=k_clusters, random_state=42, n_init='auto').fit(final_prices.reshape(-1, 1))
 cluster_centers = sorted(kmeans.cluster_centers_.flatten())
-
 support_levels, resistance_levels = [], []
 support_probs, resistance_probs = [], []
 labels = kmeans.labels_
