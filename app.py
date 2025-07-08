@@ -38,7 +38,6 @@ class VolatilityMetric(RiemannianMetric):
         self.sigma = sigma
         self.t = t
         self.T = max(T, 1e-6)  # Prevent division by zero
-        # Interpolate sigma for smoother derivatives
         self.sigma_interp = interp1d(t, sigma, bounds_error=False, fill_value=(sigma[0], sigma[-1]))
 
     def metric_matrix(self, base_point):
@@ -226,21 +225,28 @@ if df is not None and len(df) > 10:
     with col1:
         # --- Main Chart ---
         final_prices = paths[:, -1]
-        kde = gaussian_kde(final_prices)
+        kde = gaussian_kde(final_prices, bw_method='scott')
+        kde.set_bandwidth(bw_method=kde.factor * 1.5)  # Wider bandwidth for better peaks
         price_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
         u = kde(price_grid)
-        u /= np.trapz(u, price_grid) + 1e-10  # Ensure normalization
-        # Dynamic peak detection
+        u /= np.trapz(u, price_grid) + 1e-10
         peak_height = 0.05 * u.max()
         peak_distance = max(10, len(price_grid) // (25 + int(np.std(final_prices) / np.mean(final_prices) * 10)))
         peaks, _ = find_peaks(u, height=peak_height, distance=peak_distance)
+        if len(peaks) < 4:
+            peaks, _ = find_peaks(u, height=0.02 * u.max(), distance=peak_distance // 2)
         levels = price_grid[peaks]
 
         warning_message = None
         if len(levels) < 4:
             warning_message = "Few distinct peaks found. Using clustering for S/R grid."
-            X = final_prices.reshape(-1, 1)
-            db = DBSCAN(eps=np.std(final_prices) * 0.1, min_samples=n_paths//100).fit(X)
+            q1, q3 = np.percentile(final_prices, [25, 75])
+            iqr = q3 - q1
+            mask = (final_prices >= q1 - 1.5 * iqr) & (final_prices <= q3 + 1.5 * iqr)
+            X = final_prices[mask].reshape(-1, 1)
+            eps = np.std(final_prices) * 0.05 if np.std(final_prices) > np.mean(final_prices) * 0.01 else np.std(final_prices) * 0.2
+            min_samples = max(5, n_paths // 200)
+            db = DBSCAN(eps=eps, min_samples=min_samples).fit(X)
             labels = db.labels_
             cluster_centers = [np.mean(X[labels == i]) for i in set(labels) if i != -1]
             if len(cluster_centers) >= 2:
