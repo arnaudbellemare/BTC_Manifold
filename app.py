@@ -75,18 +75,24 @@ def visualize_manifold(sigma_data, t_grid, history_df):
     # Validate and clean sigma_data
     sigma_data = np.array(sigma_data)
     if len(sigma_data) == 0 or np.isnan(sigma_data).all():
-        st.warning("No valid volatility data. Using default volatility.")
-        sigma_data = np.full(len(t_grid), 0.01)
+        st.error("No valid volatility data provided. Chart cannot be generated.")
+        return None
+    st.write("Sigma data sample:", sigma_data[:5])  # Debug output
     
     # Rolling volatility
-    rolling_sigma = pd.Series(sigma_data).rolling(window=24, min_periods=1).std().fillna(0.01)
+    rolling_sigma = pd.Series(sigma_data).rolling(window=24, min_periods=1).std().fillna(method='bfill').replace(0, 0.01)
+    if rolling_sigma.isna().all():
+        st.error("Rolling volatility calculation failed. Check sigma_data.")
+        return None
+    st.write("Rolling sigma sample:", rolling_sigma[:5])  # Debug output
     
     # DataFrame with volatility ranks
     ranks = rankdata(rolling_sigma[:len(t_grid)], "average") / len(rolling_sigma[:len(t_grid)])
-    if np.isnan(ranks).any():
-        st.warning("Invalid ranks detected. Replacing with default.")
-        ranks = np.linspace(0, 1, len(t_grid))
+    if np.isnan(ranks).any() or np.all(ranks == ranks[0]):
+        st.warning("Invalid or uniform ranks detected. Using raw volatility ranks.")
+        ranks = rankdata(sigma_data[:len(t_grid)], "average") / len(sigma_data[:len(t_grid)])
     viz_df = pd.DataFrame({'Time': t_grid, 'Rank': ranks})
+    st.write("Ranks sample:", ranks[:5])  # Debug output
     
     # Convert t_grid to datetime for proper scaling
     start_date = pd.to_datetime("2025-07-01")
@@ -95,16 +101,13 @@ def visualize_manifold(sigma_data, t_grid, history_df):
 
     # Validate and convert history_df
     if history_df.empty or 'Time' not in history_df or 'Price' not in history_df:
-        st.warning("Invalid history_df. Using dummy data.")
-        history_df = pd.DataFrame({
-            'Time': start_date + pd.to_timedelta(t_grid, unit='h'),
-            'Price': np.linspace(105000, 110000, len(t_grid))
-        })
-    else:
-        history_df['Time'] = pd.to_datetime(history_df['Time'], unit='s', origin=pd.Timestamp("1970-01-01"))
-        if history_df['Price'].isna().all():
-            st.warning("No valid price data. Using dummy prices.")
-            history_df['Price'] = np.linspace(105000, 110000, len(history_df))
+        st.error("Invalid history_df. Ensure it contains 'Time' and 'Price' columns.")
+        return None
+    history_df['Time'] = pd.to_datetime(history_df['Time'], unit='s', origin=pd.Timestamp("1970-01-01"))
+    if history_df['Price'].isna().all():
+        st.error("No valid price data in history_df.")
+        return None
+    st.write("History_df sample:", history_df[['Time', 'Price']].head())  # Debug output
 
     # Time slider
     time_brush = alt.selection_interval(bind='scales', encodings=['x'])
@@ -119,10 +122,10 @@ def visualize_manifold(sigma_data, t_grid, history_df):
     # History line
     history_line = alt.Chart(history_df).mark_line(color='white', strokeWidth=2).encode(
         x='Time:T',
-        y=alt.Y('Price:Q', title="Price", scale=alt.Scale(domain=[105000, 110000], zero=False))
+        y=alt.Y('Price:Q', title="Price", scale=alt.Scale(domain=[history_df['Price'].min(), history_df['Price'].max()], zero=False))
     ).transform_filter(time_brush)
 
-    # Combine charts with adjusted layering
+    # Combine charts
     final_chart = alt.layer(gradient_background, history_line).resolve_scale(
         y='independent'
     ).properties(
