@@ -20,9 +20,8 @@ st.title("BTC/USD Price Analysis on a Volatility-Weighted Manifold")
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
         # --- THE DEFINITIVE FIX FOR GEOMSTATS COMPATIBILITY ---
-        # The parent constructor is called with NO arguments.
-        super().__init__()
-        # The dimension is set manually on the next line. This works on all versions.
+        # The parent constructor is NOT called. We manually set the required attributes.
+        # This works on all versions of the library.
         self.dim = 2
         
         self.sigma = sigma
@@ -77,7 +76,7 @@ N = len(prices)
 p0 = prices[0] if N > 0 else 70000
 returns = 100 * np.diff(prices) / prices[:-1] if N > 1 else np.array([])
 mu = np.mean(returns) * N / T / 100 if len(returns) > 0 else 0.0
-sigma = np.array([0.02] * N)
+sigma = np.array([0.02] * N) if N > 0 else np.array([])
 if len(returns) > 5:
     try:
         model = arch_model(returns, vol='Garch', p=1, q=1, rescale=False)
