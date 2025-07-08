@@ -82,7 +82,7 @@ def fetch_kraken_data(symbols, timeframe, start_date, end_date, limit):
 st.sidebar.header("Parameters")
 n_paths = st.sidebar.slider("Number of Simulated Paths", 50, 500, 100, step=50)
 n_display_paths = st.sidebar.slider("Number of Paths to Display", 5, 20, 10, step=5)
-epsilon = st.sidebar.slider("Probability Integration Range ($)", 50, 500, 200, step=50)
+epsilon = st.sidebar.slider("Probability Integration Range ($)", 50, 1000, 500, step=50)
 
 # Fetch data for July 1-7, 2025
 symbols = ['XBT/USD', 'BTC/USD', 'BTCUSDT', 'XBTUSDT']
@@ -110,7 +110,7 @@ if len(times) < 2 or not np.all(np.isfinite(times)) or not np.all(np.isfinite(pr
 
 # GARCH volatility
 returns = 100 * np.diff(prices) / prices[:-1]
-sigma = np.array([0.02] * len(prices))  # Fallback (2% volatility, scaled for BTC)
+sigma = np.array([0.02] * len(prices))  # Fallback (2% volatility)
 if len(returns) > 5:
     try:
         model = arch_model(returns, vol='Garch', p=1, q=1, rescale=False)
@@ -142,26 +142,23 @@ with st.spinner("Simulating price paths..."):
 
 # Fokker-Planck equation
 def fokker_planck(t, u, sigma, mu, prices, dp):
-    # Simplified 1D Fokker-Planck for price
     sigma_t = sigma[int(np.clip(t / T * (len(sigma) - 1), 0, len(sigma) - 1))]
     d2u = np.zeros_like(u)
     du = np.zeros_like(u)
-    price_mid = prices[1:-1] if len(prices) > 2 else prices
     if len(u) > 2:
         d2u[1:-1] = (u[2:] - 2 * u[1:-1] + u[:-2]) / dp**2
         du[1:-1] = (u[2:] - u[:-2]) / (2 * dp)
     result = np.zeros_like(u)
-    result[1:-1] = 0.5 * (sigma_t * price_mid)**2 * d2u[1:-1] - mu * price_mid * du[1:-1]
+    result[1:-1] = 0.5 * (sigma_t * prices[1:-1])**2 * d2u[1:-1] - mu * prices[1:-1] * du[1:-1]
     return result
 
 # Discretize price space
-price_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, 200)  # Finer grid
+price_grid = np.linspace(min(prices) * 0.95, max(prices) * 1.05, 200)
 dp = price_grid[1] - price_grid[0]
-# Use price-scaled standard deviation for initial Gaussian
 sigma_init = 0.01 * p0  # 1% of initial price
 u0 = np.exp(-((price_grid - p0)**2) / (2 * sigma_init**2))
-u0 = np.clip(u0, 1e-10, 1e10)  # Prevent overflow/underflow
-u0 /= np.trapz(u0, price_grid)  # Normalize
+u0 = np.clip(u0, 1e-10, 1e10)
+u0 /= np.trapz(u0, price_grid)
 
 # Solve Fokker-Planck
 with st.spinner("Solving Fokker-Planck equation..."):
@@ -171,47 +168,59 @@ with st.spinner("Solving Fokker-Planck equation..."):
             [0, T],
             u0,
             method='RK45',
-            t_eval=np.linspace(0, T, 50),  # Finer time steps
+            t_eval=np.linspace(0, T, 50),
             args=(sigma, mu, price_grid, dp),
             rtol=1e-3,
             atol=1e-6
         )
         u = sol.y[:, -1]
-        u = np.clip(u, 1e-10, 1e10)  # Prevent overflow/underflow
-        u /= np.trapz(u, price_grid)  # Normalize
-        st.write("Fokker-Planck solution shape:", u.shape, "Sample:", u[:5])
+        u = np.clip(u, 1e-10, 1e10)
+        u /= np.trapz(u, price_grid)
+        st.write("Fokker-Planck density sample:", u[:5])
     except Exception as e:
         st.error(f"Fokker-Planck solver failed: {e}. Using fallback density.")
         u = np.exp(-((price_grid - p0)**2) / (2 * (sigma_init * 2)**2))
         u = np.clip(u, 1e-10, 1e10)
         u /= np.trapz(u, price_grid)
-        st.write("Fallback density shape:", u.shape, "Sample:", u[:5])
 
-# Identify support/resistance levels
-peaks, _ = find_peaks(u, height=0.1 * u.max(), distance=10)
-support_resistance = price_grid[peaks]
-if len(support_resistance) == 0:
-    st.warning("No significant peaks found. Using price grid quantiles.")
-    support_resistance = np.quantile(price_grid, [0.25, 0.5, 0.75])
+# Identify support and resistance levels
+du = np.gradient(u, dp)
+d2u = np.gradient(du, dp)
+support_idx = np.where((du > 0) & (d2u < 0))[0]  # Positive slope, negative curvature
+resistance_idx = np.where((du < 0) & (d2u > 0))[0]  # Negative slope, positive curvature
+support_levels = price_grid[support_idx]
+resistance_levels = price_grid[resistance_idx]
+if len(support_levels) == 0 or len(resistance_levels) == 0:
+    st.warning("Insufficient distinct levels. Using density peaks.")
+    peaks, _ = find_peaks(u, height=0.1 * u.max(), distance=10)
+    levels = price_grid[peaks]
+    support_levels = levels[levels < np.median(levels)]
+    resistance_levels = levels[levels > np.median(levels)]
 
 # Compute hit probabilities
-probs = []
-total_prob = 0.0
+support_probs = []
+resistance_probs = []
 metric = VolatilityMetric(sigma, t, T)
-for sr in support_resistance:
+total_support_prob = 0.0
+total_resistance_prob = 0.0
+
+for sr in support_levels:
     mask = (price_grid >= sr - epsilon) & (price_grid <= sr + epsilon)
     if np.any(mask):
         prob = np.trapz(u[mask], price_grid[mask]) * np.sqrt(np.linalg.det(metric.metric_matrix([T, sr])))
-        probs.append(prob)
-        total_prob += prob
-    else:
-        probs.append(0.0)
+        support_probs.append(prob)
+        total_support_prob += prob
+
+for rr in resistance_levels:
+    mask = (price_grid >= rr - epsilon) & (price_grid <= rr + epsilon)
+    if np.any(mask):
+        prob = np.trapz(u[mask], price_grid[mask]) * np.sqrt(np.linalg.det(metric.metric_matrix([T, rr])))
+        resistance_probs.append(prob)
+        total_resistance_prob += prob
 
 # Normalize probabilities
-if total_prob > 0:
-    probs = [p / total_prob for p in probs]
-else:
-    probs = [1.0 / len(support_resistance)] * len(support_resistance)  # Uniform if zero
+support_probs = [p / total_support_prob if total_support_prob > 0 else 1.0/len(support_levels) for p in support_probs]
+resistance_probs = [p / total_resistance_prob if total_resistance_prob > 0 else 1.0/len(resistance_levels) for p in resistance_probs]
 
 # Geodesic
 try:
@@ -247,7 +256,9 @@ plot_df = pd.concat([path_df, geodesic_df])
 if plot_df.empty:
     st.error("Plot data is empty. Check geodesic or paths.")
     st.stop()
-sr_df = pd.DataFrame({"Price": support_resistance, "Level": [f"Level_{i}" for i in range(len(support_resistance))]})
+
+support_df = pd.DataFrame({"Price": support_levels, "Level": [f"Support_{i}" for i in range(len(support_levels))]})
+resistance_df = pd.DataFrame({"Price": resistance_levels, "Level": [f"Resistance_{i}" for i in range(len(resistance_levels))]})
 
 # Altair chart
 base = alt.Chart(plot_df).encode(
@@ -264,18 +275,26 @@ geodesic = base.mark_line(strokeWidth=3, color="red").transform_filter(
     alt.datum.Path == "Geodesic"
 )
 
-sr_lines = alt.Chart(sr_df).mark_rule(
+support_lines = alt.Chart(support_df).mark_rule(
     strokeDash=[5, 5], color="green", strokeWidth=2
 ).encode(
     y="Price:Q"
 )
 
-chart = (paths + geodesic + sr_lines).properties(
-    title="BTC/USD Price Paths, Geodesic, and Support/Resistance Levels",
+resistance_lines = alt.Chart(resistance_df).mark_rule(
+    strokeDash=[5, 5], color="red", strokeWidth=2
+).encode(
+    y="Price:Q"
+)
+
+chart = (paths + geodesic + support_lines + resistance_lines).properties(
+    title="BTC/USD Price Paths, Geodesic, Support, and Resistance Levels",
     width=800,
     height=400
 )
 
 st.altair_chart(chart, use_container_width=True)
-st.write("**Support/Resistance Levels (BTC/USD):**", support_resistance)
-st.write("**Hit Probabilities:**", dict(zip(support_resistance, probs)))
+st.write("**Support Levels (BTC/USD):**", support_levels)
+st.write("**Support Hit Probabilities:**", dict(zip(support_levels, support_probs)))
+st.write("**Resistance Levels (BTC/USD):**", resistance_levels)
+st.write("**Resistance Hit Probabilities:**", dict(zip(resistance_levels, resistance_probs)))
