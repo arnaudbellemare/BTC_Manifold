@@ -23,7 +23,6 @@ class VolatilityMetric(RiemannianMetric):
         self.sigma = sigma
         self.t = t
         self.T = T
-        # We will not use the high-level geodesic function, so no exp_solver is needed here.
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
@@ -31,27 +30,34 @@ class VolatilityMetric(RiemannianMetric):
         sigma_val = max(self.sigma[idx], 0.01)
         return np.diag([1.0, sigma_val**2])
 
-    # --- FIX: Add the required method to calculate curvature terms for the geodesic ---
+    # --- ADAPTATION: Upgraded with the more mathematically rigorous Christoffel symbols ---
     def christoffel_symbols(self, base_point):
         t_val = base_point[0]
-        g_inv = np.linalg.inv(self.metric_matrix(base_point))
         
-        # Numerically calculate the derivative of sigma
-        eps = 1e-6
-        idx_plus = int(np.clip((t_val + eps) / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
-        idx_minus = int(np.clip((t_val - eps) / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
+        # Get sigma and its derivative at the current time point
+        idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
+        sigma_val = max(self.sigma[idx], 0.01)
         
-        sigma_plus = self.sigma[idx_plus]
-        sigma_minus = self.sigma[idx_minus]
+        eps = 1e-6 # For numerical differentiation
+        t_plus = min(t_val + eps, self.T)
+        t_minus = max(t_val - eps, 0)
         
-        d_sigma_dt = (sigma_plus - sigma_minus) / (2 * eps)
-        sigma_val = self.sigma[int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))]
+        idx_plus = int(np.clip(t_plus / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
+        idx_minus = int(np.clip(t_minus / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         
-        # For this diagonal metric, only a few Christoffel symbols are non-zero
+        d_sigma_dt = (self.sigma[idx_plus] - self.sigma[idx_minus]) / (2 * eps)
+
+        # Initialize the 2x2x2 tensor for Christoffel symbols
         gamma = np.zeros((2, 2, 2))
-        gamma[0, 1, 1] = -sigma_val * d_sigma_dt  # Corresponds to Γ^p_tt
-        gamma[1, 0, 1] = g_inv[1, 1] * sigma_val * d_sigma_dt # Corresponds to Γ^t_pt
+        
+        # Based on the metric g = diag([1, sigma(t)^2]), the only non-zero symbols are:
+        # Note: indices are [k, i, j] for Gamma^k_{ij}
+        # Gamma^p_{tp} = Gamma^p_{pt} = (1/sigma) * d(sigma)/dt
+        gamma[1, 0, 1] = (1 / sigma_val) * d_sigma_dt
         gamma[1, 1, 0] = gamma[1, 0, 1]
+        
+        # Gamma^t_{pp} = -sigma * d(sigma)/dt
+        gamma[0, 1, 1] = -sigma_val * d_sigma_dt
         
         return gamma
 
@@ -161,10 +167,11 @@ for rr in resistance_levels:
 if total_support_prob > 0: support_probs = [p / total_support_prob for p in support_probs]
 if total_resistance_prob > 0: resistance_probs = [p / total_resistance_prob for p in resistance_probs]
 
-# --- FIX: ROBUST GEODESIC CALCULATION VIA SOLVE_IVP ---
-# This bypasses the fragile metric.geodesic() function entirely.
+# ROBUST GEODESIC CALCULATION VIA SOLVE_IVP
 def geodesic_equation(s, y, metric_obj):
+    # y = [t, p, v_t, v_p]
     pos, vel = y[:2], y[2:]
+    # The geodesic equation: a^k = -Gamma^k_{ij} v^i v^j
     gamma = metric_obj.christoffel_symbols(pos)
     accel = -np.einsum('ijk,j,k->i', gamma, vel, vel)
     return np.concatenate([vel, accel])
@@ -172,8 +179,7 @@ def geodesic_equation(s, y, metric_obj):
 try:
     delta_p = prices[-1] - p0 if N > 0 else 0
     initial_point = np.array([0.0, p0])
-    # Set a non-zero velocity in the time direction to ensure movement
-    initial_velocity = np.array([1.0, delta_p / T if T > 0 else 0.0])
+    initial_velocity = np.array([1.0, delta_p / T if T > 0 else 0.0]) # v_t = 1 to parameterize by time
     y0 = np.concatenate([initial_point, initial_velocity])
     
     sol = solve_ivp(
