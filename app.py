@@ -5,7 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
-from geomstats.geometry.manifold import Euclidean  # Fixed import
+from geomstats.geometry.euclidean import Euclidean
 from geomstats.numerics.geodesic import ExpODESolver
 from geomstats.numerics.ivp import ScipySolveIVP
 from geomstats.learning.kmeans import RiemannianKMeans
