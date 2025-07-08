@@ -15,13 +15,14 @@ st.title("BTC/USD Price Analysis on Riemannian Manifold")
 # Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        super().__init__(dim=2)
+        super().__init__(2)
         self.sigma = sigma
         self.t = t
         self.T = T
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
+        # Ensure index is within bounds of the sigma array
         idx = int(np.clip(t_val / self.T * (len(self.sigma) - 1), 0, len(self.sigma) - 1))
         return np.diag([1.0, self.sigma[idx]**2])
 
