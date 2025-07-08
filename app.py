@@ -98,25 +98,23 @@ def simulate_paths_manifold(metric, p0, T, N, n_paths):
     t = np.linspace(0, T, N)
     paths = np.zeros((n_paths, N))
     paths[:, 0] = p0
-    integrator = ScipySolveIVP(method='RK45', point_ndim=2)
 
-    def sde(t, state, metric):
-        pos = state[:2]
+    def sde(t, pos, metric):
         g_inv = np.linalg.inv(metric.metric_matrix(pos))
         drift = np.array([1.0, metric.mu_interp(t)])  # Time advances, price follows mu
         diffusion = np.sqrt(g_inv[1, 1])  # Volatility from metric
-        return np.concatenate([drift, np.zeros(2)])  # State includes position and velocity
+        return drift, diffusion
 
     for i in range(n_paths):
-        path = [np.array([0.0, p0])]
+        path = np.zeros((N, 2))  # Store [t, p] for each time step
+        path[0, :] = [0.0, p0]
         for j in range(N - 1):
+            pos = path[j, :]
+            drift, diffusion = sde(t[j], pos, metric)
             dW = np.random.normal(0, np.sqrt(dt))
-            state = path[-1]
-            det_drift = sde(t[j], state, metric)[:2]
-            stoch_drift = np.array([0.0, dW * np.sqrt(metric.metric_matrix([t[j], path[-1][1]])[1, 1])])
-            next_pos = state[:2] + det_drift * dt + stoch_drift
-            path.append(np.concatenate([next_pos, np.zeros(2)]))
-        paths[i, :] = np.array(path)[:, 1]
+            stoch_term = np.array([0.0, diffusion * dW])
+            path[j + 1, :] = pos + drift * dt + stoch_term
+        paths[i, :] = path[:, 1]  # Extract price coordinate
     return paths, t
 
 def compute_critical_levels(metric, t_grid, p_grid, n_levels=4):
