@@ -6,7 +6,8 @@ import altair as alt
 from scipy.signal import find_peaks
 from arch import arch_model
 from geomstats.geometry.riemannian_metric import RiemannianMetric
-from geomstats.geometry.euclidean import Euclidean  # Added for manifold
+from geomstats.geometry.euclidean import Euclidean
+from geomstats.numerics.geodesic import GeodesicIVP  # Added for solver
 import warnings
 import time
 warnings.filterwarnings("ignore")
@@ -16,10 +17,11 @@ st.title("BTC/USD Price Analysis on Riemannian Manifold")
 # Volatility-weighted metric
 class VolatilityMetric(RiemannianMetric):
     def __init__(self, sigma, t, T):
-        super().__init__(space=Euclidean(dim=2))  # Define 2D Euclidean manifold
+        super().__init__(space=Euclidean(dim=2))
         self.sigma = sigma
         self.t = t
         self.T = T
+        self.exp_solver = GeodesicIVP()  # Set explicit solver
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
@@ -109,7 +111,7 @@ else:
     st.stop()
 
 p0 = prices[0]
-T = times.iloc[-1]  # Use pandas iloc indexing
+T = times.iloc[-1]  # Pandas iloc indexing
 N = len(prices)
 mu = np.mean(returns) * N / T / 100 if len(returns) > 0 else 0.0
 
@@ -182,7 +184,7 @@ paths = base.mark_line(opacity=0.05).transform_filter(
 )
 
 geodesic = base.mark_line(strokeWidth=3, color="red").transform_filter(
-    alt.datum.Path == "Geodesic"
+    alt.datum.Path != "Geodesic"
 )
 
 sr_lines = alt.Chart(sr_df).mark_rule(
