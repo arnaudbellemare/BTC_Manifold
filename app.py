@@ -72,11 +72,20 @@ def visualize_manifold(sigma_data, t_grid, history_df):
     st.subheader("Visualizing the Market Manifold")
     st.write("This chart shows the relative volatility over time. Yellow areas are periods of the highest volatility, where price movement is 'difficult'. Dark areas are the lowest volatility periods.")
     
+    # Validate and clean sigma_data
+    sigma_data = np.array(sigma_data)
+    if len(sigma_data) == 0 or np.isnan(sigma_data).all():
+        st.warning("No valid volatility data. Using default volatility.")
+        sigma_data = np.full(len(t_grid), 0.01)
+    
     # Rolling volatility
-    rolling_sigma = pd.Series(sigma_data).rolling(window=24, min_periods=1).std()
+    rolling_sigma = pd.Series(sigma_data).rolling(window=24, min_periods=1).std().fillna(0.01)
     
     # DataFrame with volatility ranks
     ranks = rankdata(rolling_sigma[:len(t_grid)], "average") / len(rolling_sigma[:len(t_grid)])
+    if np.isnan(ranks).any():
+        st.warning("Invalid ranks detected. Replacing with default.")
+        ranks = np.linspace(0, 1, len(t_grid))
     viz_df = pd.DataFrame({'Time': t_grid, 'Rank': ranks})
     
     # Convert t_grid to datetime for proper scaling
