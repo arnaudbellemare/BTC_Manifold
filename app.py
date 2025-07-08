@@ -141,9 +141,9 @@ density = hist / hist.max()
 
 # K-Means clustering for support/resistance
 try:
-    metric = VolatilityMetric(sigma, t, T)
+    manifold = Euclidean(dim=2)
     data = np.vstack([t, paths[0]]).T  # Use first path for clustering
-    kmeans = RiemannianKMeans(metric=metric, n_clusters=n_clusters, tol=1e-3)
+    kmeans = RiemannianKMeans(space=manifold, n_clusters=n_clusters, tol=1e-3)
     kmeans.fit(data)
     labels = kmeans.labels_
     cluster_centers = kmeans.cluster_centers_
@@ -154,6 +154,7 @@ except Exception as e:
 
 # Geodesic with geomstats
 try:
+    metric = VolatilityMetric(sigma, t, T)
     geodesic = metric.geodesic(
         initial_point=np.array([0.0, p0]),
         initial_tangent_vec=np.array([1.0, mu * 0.001])
