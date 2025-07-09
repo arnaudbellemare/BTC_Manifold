@@ -500,7 +500,7 @@ all_instruments = get_thalex_instruments()
 coin = "BTC"
 expiries = get_expiries_from_instruments(all_instruments, coin)
 sel_expiry = st.sidebar.selectbox("Options Expiry", expiries, index=0) if expiries else None
-r_rate = st.sidebar.slider("Interest Rate (%)", 0.0, 10.0, 1.6, 0.1) / 100.0
+r_rate = st.sidebar.slider("Prime rate (%)", 0.0, 14.0, 1.6, 0.1) / 100.0
 use_oi_weights = st.sidebar.checkbox("Use OI Weights", value=True)
 ivrv_n_days = st.sidebar.slider("N-day period for IV/RV analysis", 7, 180, 30, 1)
 run_btn = st.sidebar.button("Run Analysis", use_container_width=True, type="primary", disabled=not sel_expiry)
