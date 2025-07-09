@@ -26,7 +26,7 @@ st.markdown("""
 This application models the Bitcoin market as a 2D geometric space (manifold) of (Time, Log-Price), warped by GARCH-derived volatility.  
 - **Geodesic (Red Line):** The "straightest" path through the volatility landscape.  
 - **S/R Grid:** Support (green) and resistance (red) levels derived from Monte Carlo simulations, shown on main and volume profile charts.  
-- **Volume Profile:** Historical trading activity with S/R levels, highlighting high-volume price zones.  
+- **Volume Profile:** Historical trading activity with S/R levels, POC (orange), and current price (light blue).  
 *Use the sidebar to adjust parameters and explore interactively. Hover over charts for details.*
 """)
 
@@ -158,11 +158,11 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
     
     for level in s_levels:
         fig.add_vrect(x0=level - epsilon, x1=level + epsilon, fillcolor="green", opacity=0.2, 
-                      layer="below", line_width=0, annotation_text="Support", annotation_position="top")
+                      layer="below", line_width=0, annotation_text="Support", annotation_position="top left")
         fig.add_vline(x=level, line_color='green', line_dash='dash')
     for level in r_levels:
         fig.add_vrect(x0=level - epsilon, x1=level + epsilon, fillcolor="red", opacity=0.2, 
-                      layer="below", line_width=0, annotation_text="Resistance", annotation_position="top")
+                      layer="below", line_width=0, annotation_text="Resistance", annotation_position="top left")
         fig.add_vline(x=level, line_color='red', line_dash='dash')
         
     fig.update_layout(
@@ -198,8 +198,14 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, n_bins=100):
         marker_color='lightblue',
         hovertemplate='Price: $%{y:,.2f}<br>Volume: %{x:,.0f}'
     ))
+    # Add POC line in orange
     fig.add_shape(type="line", y0=poc['price_bin'], y1=poc['price_bin'], x0=0, x1=poc['volume'], 
-                  line=dict(color="blue", width=2, dash="dash"))
+                  line=dict(color="orange", width=2, dash="dash"))
+    # Add current price line in light blue
+    current_price = df['close'].iloc[-1] if not df['close'].empty else None
+    if current_price and not np.isnan(current_price):
+        fig.add_hline(y=current_price, line_color='lightblue', line_width=2, line_dash='solid',
+                      annotation_text="Current Price", annotation_position="top right")
     # Add S/R levels
     for level in s_levels:
         fig.add_hrect(y0=level - epsilon, y1=level + epsilon, fillcolor="green", opacity=0.2, 
@@ -210,7 +216,7 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, n_bins=100):
                       layer="below", line_width=0, annotation_text="Resistance", annotation_position="top left")
         fig.add_hline(y=level, line_color='red', line_dash='dash')
     fig.update_layout(
-        title="Historical Volume Profile with S/R Zones",
+        title="Historical Volume Profile with S/R Zones and Current Price",
         xaxis_title="Volume Traded",
         yaxis_title="Price (USD)",
         template="plotly_white",
@@ -419,14 +425,17 @@ if df is not None and len(df) > 10:
         st.header("Historical Context: Volume-by-Price Analysis")
         st.markdown("""
         High-volume price levels act as strong support or resistance.  
-        Green (support) and red (resistance) zones show simulated S/R levels. Overlapping levels indicate high-conviction zones.  
-        *Red dashed line: Point of Control (POC), the most traded price.*
+        Green (support) and red (resistance) zones show simulated S/R levels.  
+        Orange dashed line: POC. Light blue solid line: Current price.  
+        Overlapping levels indicate high-conviction zones.
         """)
         volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon)
         if volume_profile_fig and poc is not None:
             try:
                 st.plotly_chart(volume_profile_fig, use_container_width=True)
                 st.metric("Point of Control (POC)", f"${poc['price_bin']:,.2f}")
+                if current_price and not np.isnan(current_price):
+                    st.metric("Current Price", f"${current_price:,.2f}")
             except Exception as e:
                 st.error(f"Failed to render volume profile chart: {e}")
 
