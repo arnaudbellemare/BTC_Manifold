@@ -199,7 +199,7 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, n_bins=100):
         hovertemplate='Price: $%{y:,.2f}<br>Volume: %{x:,.0f}'
     ))
     fig.add_shape(type="line", y0=poc['price_bin'], y1=poc['price_bin'], x0=0, x1=poc['volume'], 
-                  line=dict(color="red", width=2, dash="dash"))
+                  line=dict(color="blue", width=2, dash="dash"))
     # Add S/R levels
     for level in s_levels:
         fig.add_hrect(y0=level - epsilon, y1=level + epsilon, fillcolor="green", opacity=0.2, 
