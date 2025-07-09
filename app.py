@@ -728,7 +728,7 @@ if df is not None and len(df) > 10:
                         base = alt.Chart(combined_df).encode(
                             x=alt.X("Time:Q", title="Time (days)"),
                             y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False)),
-                            color=alt.Color("Path:N", title="Path Type", scale=alt.Scale(domain=["Historical Price", "Geodesic"], range=["blue", "red"]))
+                            color=alt.Color("Path:N", title="Path Type", scale=alt.Scale(domain=["Historical Price", "Geodesic"], range=["blue", "orange"]))
                         )
                         price_line = base.mark_line(strokeWidth=2).encode(detail='Path:N')
                         # Add S/R lines
