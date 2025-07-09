@@ -24,10 +24,10 @@ st.set_page_config(layout="wide")
 st.title("BTC/USD Price Analysis on a Volatility-Weighted Manifold")
 st.markdown("""
 This application models the Bitcoin market as a 2D geometric space (manifold) of (Time, Log-Price), warped by GARCH-derived volatility.  
-- **Geodesic (Red Line):** The "straightest" path through the volatility landscape, indicating the market's path of least resistance.  
-- **S/R Grid:** Support (green) and resistance (red) levels derived from Monte Carlo simulations, showing probable future price zones.  
-- **Volume Profile:** Historical trading activity, highlighting high-volume price levels that act as organic support/resistance.  
-*Use the sidebar to adjust parameters and explore the model interactively. Hover over charts for details.*
+- **Geodesic (Red Line):** The "straightest" path through the volatility landscape.  
+- **S/R Grid:** Support (green) and resistance (red) levels derived from Monte Carlo simulations.  
+- **Volume Profile:** Historical trading activity, highlighting high-volume price levels.  
+*Use the sidebar to adjust parameters and explore interactively. Hover over charts for details.*
 """)
 
 # --- Geometric Modeling Class ---
@@ -43,8 +43,8 @@ class VolatilityMetric(RiemannianMetric):
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
-        sigma_val = max(self.sigma_interp(t_val), 1e-6)  # Use interpolated GARCH volatility
-        return np.diag([1.0, sigma_val**2]) + 1e-6 * np.eye(2)  # Ensure positive definiteness
+        sigma_val = max(self.sigma_interp(t_val), 1e-6)
+        return np.diag([1.0, sigma_val**2]) + 1e-6 * np.eye(2)
 
     def christoffel_symbols(self, base_point):
         t_val = base_point[0]
@@ -124,39 +124,6 @@ def simulate_paths(p0, mu, sigma, T, N, n_paths):
     t = np.linspace(0, T, N)
     paths = Parallel(n_jobs=-1)(delayed(simulate_single_path)(p0, mu, sigma, T, N, dt, i) for i in range(n_paths))
     return np.array(paths), t
-
-def weighted_quantile(data, quantiles, weights):
-    """Compute weighted quantiles for a 1D array."""
-    if len(data) != len(weights) or len(data) == 0:
-        raise ValueError("Data and weights must have the same length and be non-empty")
-    
-    weights = np.array(weights)
-    weights = weights / (np.sum(weights) + 1e-10)  # Normalize weights
-    
-    sorted_indices = np.argsort(data)
-    sorted_data = data[sorted_indices]
-    sorted_weights = weights[sorted_indices]
-    
-    cumsum = np.cumsum(sorted_weights)
-    
-    result = []
-    for q in quantiles:
-        idx = np.searchsorted(cumsum, q, side='right')
-        if idx == 0:
-            result.append(sorted_data[0])
-        elif idx == len(data):
-            result.append(sorted_data[-1])
-        else:
-            w_lower = cumsum[idx - 1]
-            w_upper = cumsum[idx]
-            if w_upper == w_lower:
-                result.append(sorted_data[idx])
-            else:
-                frac = (q - w_lower) / (w_upper - w_lower)
-                value = sorted_data[idx - 1] + frac * (sorted_data[idx] - sorted_data[idx - 1])
-                result.append(value)
-    
-    return np.array(result)
 
 def get_hit_prob(level_list, price_grid, u, metric, T, epsilon, geodesic_prices):
     probs = []
@@ -307,7 +274,7 @@ if df is not None and len(df) > 10:
             else:
                 kde = gaussian_kde(final_prices, bw_method='scott')
                 kde.set_bandwidth(bw_method=kde.factor * (1.5 if price_std / price_mean < 0.02 else 1.0))
-                price_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
+                price_grid = np.linspace(final_prices.min(), final_prices.max(), 1000)  # Finer grid
                 u = kde(price_grid)
                 u /= np.trapz(u, price_grid) + 1e-10
 
@@ -331,48 +298,50 @@ if df is not None and len(df) > 10:
                 geodesic_price = np.interp(T, geodesic_df["Time"], geodesic_df["Price"]) if not geodesic_df.empty else price_mean
                 geodesic_weights = np.exp(-np.abs(price_grid - geodesic_price) / (2 * price_std))
                 u_weighted = u * geodesic_weights
-                peak_height = 0.05 * u_weighted.max()
-                peak_distance = max(5, len(price_grid) // (30 + int(price_std / price_mean * 15)))
-                peaks, _ = find_peaks(u_weighted, height=peak_height, distance=peak_distance)
+                # Smooth density for better peak detection
+                from scipy.ndimage import gaussian_filter1d
+                u_smooth = gaussian_filter1d(u_weighted, sigma=2)
+                peak_height = 0.05 * u_smooth.max()
+                peak_distance = max(10, len(price_grid) // 50)  # Adjusted for finer grid
+                peaks, _ = find_peaks(u_smooth, height=peak_height, distance=peak_distance)
                 if len(peaks) < 4:
-                    peaks, _ = find_peaks(u_weighted, height=0.01 * u_weighted.max(), distance=peak_distance // 2)
+                    peaks, _ = find_peaks(u_smooth, height=0.01 * u_smooth.max(), distance=peak_distance // 2)
                 levels = price_grid[peaks]
 
                 warning_message = None
                 if len(peaks) < 4:
-                    warning_message = "Insufficient peaks detected. Using manifold-informed clustering."
-                    X = final_prices.reshape(-1, 1)
-                    sigma_T = max(metric.sigma_interp(T), 1e-6)
-                    eps = sigma_T * np.std(final_prices) * 0.1
-                    min_samples = max(5, n_paths // 200)
-                    
-                    def custom_dist(X):
-                        return pairwise_distances(X, metric=lambda x, y: manifold_distance(x[0], y[0], metric, T))
-                    
+                    warning_message = "Insufficient peaks detected. Using grid-based density clustering."
+                    # Grid-based density clustering
                     try:
-                        db = DBSCAN(eps=eps, min_samples=min_samples, metric='precomputed').fit(custom_dist(X))
-                        labels = db.labels_
-                        cluster_centers = [np.mean(X[labels == i]) for i in set(labels) if i != -1]
-                        
+                        # Create histogram on price grid
+                        hist, bin_edges = np.histogram(final_prices, bins=100, density=True)
+                        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                        # Smooth histogram
+                        hist_smooth = gaussian_filter1d(hist, sigma=2)
+                        # Find peaks in smoothed histogram
+                        hist_peaks, _ = find_peaks(hist_smooth, height=0.05 * hist_smooth.max(), distance=5)
+                        if len(hist_peaks) < 4:
+                            hist_peaks, _ = find_peaks(hist_smooth, height=0.01 * hist_smooth.max(), distance=3)
+                        cluster_centers = bin_centers[hist_peaks]
                         if len(cluster_centers) < 4:
-                            warning_message += " Insufficient clusters. Supplementing with weighted quantiles."
-                            weights = 1 / (sigma + 1e-6)
-                            weighted_quantiles = weighted_quantile(final_prices, [0.15, 0.35, 0.65, 0.85], weights)
-                            cluster_centers.extend(weighted_quantiles)
-                            cluster_centers = np.unique(cluster_centers)[:6]
-                        
-                        levels = np.sort(cluster_centers)
+                            # Supplement with highest density points
+                            top_indices = np.argsort(hist_smooth)[-4:]  # Take top 4 density points
+                            cluster_centers = np.sort(bin_centers[top_indices])
+                        levels = np.sort(cluster_centers[:6])  # Limit to 6 levels
                     except Exception as e:
-                        st.warning(f"Clustering failed: {e}. Using quantiles.")
-                        levels = np.quantile(final_prices, [0.15, 0.35, 0.65, 0.85])
+                        st.warning(f"Grid-based clustering failed: {e}. Using density maxima.")
+                        top_indices = np.argsort(u_smooth)[-4:]  # Fallback to top density points
+                        levels = np.sort(price_grid[top_indices])
                 
                 median_of_peaks = np.median(levels)
                 support_levels = levels[levels <= median_of_peaks][:2]
                 resistance_levels = levels[levels > median_of_peaks][-2:]
                 if len(support_levels) < 2 or len(resistance_levels) < 2:
-                    quantiles = np.quantile(final_prices, [0.25, 0.5, 0.75])
-                    support_levels = np.unique(np.sort(np.concatenate([support_levels, quantiles[:2]])))[:2]
-                    resistance_levels = np.unique(np.sort(np.concatenate([resistance_levels, quantiles[1:]])))[-2:]
+                    # Use grid-based density maxima instead of quantiles
+                    top_indices = np.argsort(u_smooth)[-4:]
+                    extra_levels = np.sort(price_grid[top_indices])
+                    support_levels = np.unique(np.sort(np.concatenate([support_levels, extra_levels[:2]])))[:2]
+                    resistance_levels = np.unique(np.sort(np.concatenate([resistance_levels, extra_levels[2:]])))[-2:]
 
                 path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} 
                              for i in range(min(n_paths, n_display_paths)) for j in range(N)]
