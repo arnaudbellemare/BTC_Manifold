@@ -673,11 +673,21 @@ if df is not None and len(df) > 10:
                         resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
                         # Compute profitability zone from SVI PDF using sidebar value
                         cumulative_prob = np.cumsum(u) * (price_grid[1] - price_grid[0])
-                        target_prob = st.session_state.get('profitability_threshold', 0.68)  # Default to 68% if not set
-                        lower_idx = np.where(cumulative_prob >= (1 - target_prob) / 2)[0][0]
-                        upper_idx = np.where(cumulative_prob >= (1 + target_prob) / 2)[0][0]
-                        profit_lower = price_grid[lower_idx]
-                        profit_upper = price_grid[upper_idx]
+                        total_prob = cumulative_prob[-1]
+                        target_prob = max(0.68, st.session_state.get('profitability_threshold', 0.68))  # Enforce minimum 68%
+                        if total_prob > 0:
+                            lower_prob = (1 - target_prob) / 2
+                            upper_prob = (1 + target_prob) / 2
+                            lower_idx = np.searchsorted(cumulative_prob, lower_prob * total_prob, side='right')
+                            upper_idx = np.searchsorted(cumulative_prob, upper_prob * total_prob, side='right')
+                            if lower_idx >= len(price_grid) or upper_idx >= len(price_grid):
+                                lower_idx = 0
+                                upper_idx = len(price_grid) - 1
+                            profit_lower = price_grid[lower_idx]
+                            profit_upper = price_grid[upper_idx]
+                        else:
+                            profit_lower = forward_price * 0.9
+                            profit_upper = forward_price * 1.1
                         profit_zone_df = pd.DataFrame({
                             'Time': [0, T, T, 0],
                             'Price': [profit_lower, profit_lower, profit_upper, profit_upper],
