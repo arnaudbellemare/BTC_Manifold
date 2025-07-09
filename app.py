@@ -130,29 +130,23 @@ def weighted_quantile(data, quantiles, weights):
     if len(data) != len(weights) or len(data) == 0:
         raise ValueError("Data and weights must have the same length and be non-empty")
     
-    # Normalize weights
     weights = np.array(weights)
-    weights = weights / (np.sum(weights) + 1e-10)  # Avoid division by zero
+    weights = weights / (np.sum(weights) + 1e-10)  # Normalize weights
     
-    # Sort data and weights
     sorted_indices = np.argsort(data)
     sorted_data = data[sorted_indices]
     sorted_weights = weights[sorted_indices]
     
-    # Cumulative sum of weights
     cumsum = np.cumsum(sorted_weights)
     
-    # Compute quantiles
     result = []
     for q in quantiles:
-        # Find index where cumulative weight exceeds quantile
         idx = np.searchsorted(cumsum, q, side='right')
         if idx == 0:
             result.append(sorted_data[0])
         elif idx == len(data):
             result.append(sorted_data[-1])
         else:
-            # Linear interpolation between adjacent points
             w_lower = cumsum[idx - 1]
             w_upper = cumsum[idx]
             if w_upper == w_lower:
@@ -166,32 +160,31 @@ def weighted_quantile(data, quantiles, weights):
 
 def get_hit_prob(level_list, price_grid, u, metric, T, epsilon, geodesic_prices):
     probs = []
-    total_prob = np.trapz(u, price_grid)  # Total probability for normalization
+    total_prob = np.trapz(u, price_grid)
     for level in level_list:
         mask = (price_grid >= level - epsilon) & (price_grid <= level + epsilon)
-        raw_prob = np.trapz(u[mask], price_grid[mask])  # Local probability
-        # Stabilize volume element
+        raw_prob = np.trapz(u[mask], price_grid[mask])
         metric_mat = metric.metric_matrix([T, level])
-        det = max(np.abs(np.linalg.det(metric_mat)), 1e-6)  # Ensure positive and non-zero
+        det = max(np.abs(np.linalg.det(metric_mat)), 1e-6)
         volume_element = np.sqrt(det)
-        # Weight by proximity to geodesic
         geodesic_price = np.interp(T, geodesic_prices["Time"], geodesic_prices["Price"])
         geodesic_weight = np.exp(-np.abs(level - geodesic_price) / (2 * epsilon))
         prob = raw_prob * volume_element * geodesic_weight
         probs.append(prob)
-    # Normalize probabilities to sum to 1 across all levels
     total_level_prob = sum(probs) + 1e-10
     return [p / total_level_prob for p in probs] if total_level_prob > 0 else [0] * len(level_list)
 
 def manifold_distance(x, y, metric, T):
-    """Compute distance on the volatility-weighted manifold."""
     point_x = np.array([T, x])
     point_y = np.array([T, y])
-    metric_mat = metric.metric_matrix([T, (x + y) / 2])  # Average point for metric
+    metric_mat = metric.metric_matrix([T, (x + y) / 2])
     delta = point_x - point_y
     return np.sqrt(max(delta.T @ metric_mat @ delta, 1e-6))
 
 def create_interactive_density_chart(price_grid, density, s_levels, r_levels, epsilon):
+    if len(price_grid) == 0 or len(density) == 0:
+        st.error("Density chart data is empty. Cannot render plot.")
+        return None
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=price_grid, y=density, mode='lines', name='Probability Density', 
                             fill='tozeroy', line_color='lightblue', hovertemplate='Price: $%{x:,.2f}<br>Density: %{y:.4f}'))
@@ -207,19 +200,29 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
         
     fig.update_layout(
         title="Probability Distribution with S/R Zones",
-        xaxis_title="Final Price (USD)",
-        yaxis_title="Probability Density",
+        xaxis_title="Price (USD)",
+        yaxis_title="Density",
         showlegend=False,
         hovermode="x unified",
-        template="plotly_white"
+        template="plotly_white",
+        height=400
     )
     return fig
 
 def create_volume_profile_chart(df, n_bins=100):
+    if df.empty or 'close' not in df or 'volume' not in df:
+        st.error("Volume profile data is invalid or empty. Cannot render plot.")
+        return None, None
     price_range = df['close'].max() - df['close'].min()
+    if price_range == 0:
+        st.error("Price range is zero. Cannot compute volume profile.")
+        return None, None
     bin_size = price_range / n_bins
     df['price_bin'] = (df['close'] // bin_size) * bin_size
     volume_by_price = df.groupby('price_bin')['volume'].sum().reset_index()
+    if volume_by_price.empty:
+        st.error("Volume profile data is empty after grouping. Cannot render plot.")
+        return None, None
     poc = volume_by_price.loc[volume_by_price['volume'].idxmax()]
     fig = go.Figure(go.Bar(
         y=volume_by_price['price_bin'], 
@@ -233,29 +236,29 @@ def create_volume_profile_chart(df, n_bins=100):
     fig.update_layout(
         title="Historical Volume Profile",
         xaxis_title="Volume Traded",
-        yaxis_title="Price Level (USD)",
-        template="plotly_white"
+        yaxis_title="Price (USD)",
+        template="plotly_white",
+        height=400
     )
     return fig, poc
 
 # --- Main Application Logic ---
 st.sidebar.header("Model Parameters")
-st.sidebar.markdown("Adjust the settings below to customize the analysis. *Hover over labels for details.*")
 days_history = st.sidebar.slider(
     "Historical Data (Days)", 7, 90, 30, 
-    help="Number of days of historical BTC/USD data to fetch. More data improves model accuracy but increases computation time."
+    help="Number of days of historical BTC/USD data to fetch."
 )
 n_paths = st.sidebar.slider(
-    "Simulated Paths", 500, 10000, 2000, step=100, 
-    help="Number of Monte Carlo price paths to simulate. Higher values improve S/R estimates but slow down computation."
+    "Simulated Paths", 500, 5000, 2000, step=100, 
+    help="Number of Monte Carlo price paths to simulate."
 )
 n_display_paths = st.sidebar.slider(
-    "Displayed Paths", 10, 200, 50, step=10, 
-    help="Number of simulated paths to show in the main chart. Fewer paths improve visualization performance."
+    "Displayed Paths", 10, 100, 50, step=10, 
+    help="Number of simulated paths to show in the main chart."
 )
 epsilon_factor = st.sidebar.slider(
     "Probability Range Factor", 0.1, 2.0, 0.5, step=0.05, 
-    help="Controls the width of S/R probability zones. Smaller values create tighter zones; larger values capture more probability."
+    help="Controls the width of S/R probability zones."
 )
 reset_button = st.sidebar.button("Reset to Defaults")
 if reset_button:
@@ -275,173 +278,213 @@ if df is not None and len(df) > 10:
     p0 = prices[0]
     returns = 100 * df['close'].pct_change().dropna()
     
-    with st.spinner("Fitting GARCH model..."):
-        try:
-            model = arch_model(returns, vol='Garch', p=1, q=1).fit(disp='off')
-            sigma = model.conditional_volatility / 100  # GARCH volatility in decimal
-            sigma = np.pad(sigma, (N - len(sigma), 0), mode='edge')
-        except Exception:
-            st.warning("GARCH fitting failed. Using empirical volatility.")
-            sigma = np.full(N, returns.std() / 100 if not returns.empty else 0.02)
-    mu = returns.mean() / 100 if not returns.empty else 0
+    if returns.empty:
+        st.error("No valid returns data. Cannot proceed with analysis.")
+    else:
+        with st.spinner("Fitting GARCH model..."):
+            try:
+                model = arch_model(returns, vol='Garch', p=1, q=1).fit(disp='off')
+                sigma = model.conditional_volatility / 100
+                sigma = np.pad(sigma, (N - len(sigma), 0), mode='edge')
+                st.write(f"GARCH volatility range: {sigma.min():.6f} to {sigma.max():.6f}")
+            except Exception as e:
+                st.warning(f"GARCH fitting failed: {e}. Using empirical volatility.")
+                sigma = np.full(N, returns.std() / 100 if not returns.empty else 0.02)
+                st.write(f"Empirical volatility: {sigma[0]:.6f}")
+        mu = returns.mean() / 100 if not returns.empty else 0
 
-    with st.spinner("Simulating price paths..."):
-        paths, t = simulate_paths(p0, mu, sigma, T, N, n_paths)
+        with st.spinner("Simulating price paths..."):
+            paths, t = simulate_paths(p0, mu, sigma, T, N, n_paths)
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        # --- Main Chart ---
-        final_prices = paths[:, -1]
-        price_std = np.std(final_prices)
-        price_mean = np.mean(final_prices)
-        kde = gaussian_kde(final_prices, bw_method='scott')
-        kde.set_bandwidth(bw_method=kde.factor * (1.5 if price_std / price_mean < 0.02 else 1.0))
-        price_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
-        u = kde(price_grid)
-        u /= np.trapz(u, price_grid) + 1e-10
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.subheader("Price Paths and Geodesic")
+            final_prices = paths[:, -1]
+            price_std = np.std(final_prices)
+            price_mean = np.mean(final_prices)
+            if np.isnan(price_std) or np.isnan(price_mean):
+                st.error("Invalid price statistics (NaN). Cannot proceed with density estimation.")
+            else:
+                kde = gaussian_kde(final_prices, bw_method='scott')
+                kde.set_bandwidth(bw_method=kde.factor * (1.5 if price_std / price_mean < 0.02 else 1.0))
+                price_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
+                u = kde(price_grid)
+                u /= np.trapz(u, price_grid) + 1e-10
 
-        # Weight density by proximity to geodesic
-        with st.spinner("Computing geodesic path..."):
-            delta_p = prices[-1] - p0
-            recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
-            y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
-            t_eval = np.linspace(0, T, min(N, 100))
-            metric = VolatilityMetric(sigma, t, T)
-            sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), 
-                           t_eval=t_eval, rtol=1e-5, method='DOP853')
-            geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
-        
-        geodesic_price = np.interp(T, geodesic_df["Time"], geodesic_df["Price"])
-        geodesic_weights = np.exp(-np.abs(price_grid - geodesic_price) / (2 * price_std))
-        u_weighted = u * geodesic_weights
-        peak_height = 0.05 * u_weighted.max()
-        peak_distance = max(5, len(price_grid) // (30 + int(price_std / price_mean * 15)))
-        peaks, _ = find_peaks(u_weighted, height=peak_height, distance=peak_distance)
-        if len(peaks) < 4:
-            peaks, _ = find_peaks(u_weighted, height=0.01 * u_weighted.max(), distance=peak_distance // 2)
-        levels = price_grid[peaks]
+                with st.spinner("Computing geodesic path..."):
+                    delta_p = prices[-1] - p0
+                    recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
+                    y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
+                    t_eval = np.linspace(0, T, min(N, 100))
+                    metric = VolatilityMetric(sigma, t, T)
+                    try:
+                        sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), 
+                                       t_eval=t_eval, rtol=1e-5, method='DOP853')
+                        geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
+                    except Exception as e:
+                        st.error(f"Geodesic computation failed: {e}")
+                        geodesic_df = pd.DataFrame()
 
-        warning_message = None
-        if len(peaks) < 4:
-            warning_message = "Insufficient peaks detected. Using manifold-informed clustering."
-            X = final_prices.reshape(-1, 1)
-            sigma_T = max(metric.sigma_interp(T), 1e-6)
-            eps = sigma_T * np.std(final_prices) * 0.1  # Scale by volatility
-            min_samples = max(5, n_paths // 200)
-            
-            def custom_dist(X):
-                return pairwise_distances(X, metric=lambda x, y: manifold_distance(x[0], y[0], metric, T))
-            
-            db = DBSCAN(eps=eps, min_samples=min_samples, metric='precomputed').fit(custom_dist(X))
-            labels = db.labels_
-            cluster_centers = [np.mean(X[labels == i]) for i in set(labels) if i != -1]
-            
-            if len(cluster_centers) < 4:
-                warning_message += " Insufficient clusters. Supplementing with volatility-weighted quantiles."
-                weights = 1 / (sigma + 1e-6)
-                # Use custom weighted quantile function
-                weighted_quantiles = weighted_quantile(final_prices, [0.15, 0.35, 0.65, 0.85], weights)
-                cluster_centers.extend(weighted_quantiles)
-                cluster_centers = np.unique(cluster_centers)[:6]
-            
-            levels = np.sort(cluster_centers)
-        
-        median_of_peaks = np.median(levels)
-        support_levels = levels[levels <= median_of_peaks][:2]
-        resistance_levels = levels[levels > median_of_peaks][-2:]
-        if len(support_levels) < 2 or len(resistance_levels) < 2:
-            quantiles = np.quantile(final_prices, [0.25, 0.5, 0.75])
-            support_levels = np.unique(np.sort(np.concatenate([support_levels, quantiles[:2]])))[:2]
-            resistance_levels = np.unique(np.sort(np.concatenate([resistance_levels, quantiles[1:]])))[-2:]
+                if geodesic_df.empty:
+                    st.error("Geodesic path is empty. Main chart will not include geodesic.")
+                
+                geodesic_price = np.interp(T, geodesic_df["Time"], geodesic_df["Price"]) if not geodesic_df.empty else price_mean
+                geodesic_weights = np.exp(-np.abs(price_grid - geodesic_price) / (2 * price_std))
+                u_weighted = u * geodesic_weights
+                peak_height = 0.05 * u_weighted.max()
+                peak_distance = max(5, len(price_grid) // (30 + int(price_std / price_mean * 15)))
+                peaks, _ = find_peaks(u_weighted, height=peak_height, distance=peak_distance)
+                if len(peaks) < 4:
+                    peaks, _ = find_peaks(u_weighted, height=0.01 * u_weighted.max(), distance=peak_distance // 2)
+                levels = price_grid[peaks]
 
-        path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} 
-                     for i in range(min(n_paths, n_display_paths)) for j in range(N)]
-        plot_df = pd.concat([pd.DataFrame(path_data), geodesic_df])
-        support_df = pd.DataFrame({"Price": support_levels})
-        resistance_df = pd.DataFrame({"Price": resistance_levels})
-        base = alt.Chart(plot_df).encode(
-            x=alt.X("Time:Q", title="Time (hours)"),
-            y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False))
-        )
-        path_lines = base.mark_line(opacity=0.2).encode(
-            color=alt.value('gray'), detail='Path:N'
-        ).transform_filter(alt.datum.Path != "Geodesic")
-        geodesic_line = base.mark_line(strokeWidth=3, color="red").transform_filter(alt.datum.Path == "Geodesic")
-        support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
-        resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
-        chart = (path_lines + geodesic_line + support_lines + resistance_lines).properties(
-            title="Price Paths, Geodesic, and S/R Grid", height=500
-        ).interactive()
-        st.altair_chart(chart, use_container_width=True)
+                warning_message = None
+                if len(peaks) < 4:
+                    warning_message = "Insufficient peaks detected. Using manifold-informed clustering."
+                    X = final_prices.reshape(-1, 1)
+                    sigma_T = max(metric.sigma_interp(T), 1e-6)
+                    eps = sigma_T * np.std(final_prices) * 0.1
+                    min_samples = max(5, n_paths // 200)
+                    
+                    def custom_dist(X):
+                        return pairwise_distances(X, metric=lambda x, y: manifold_distance(x[0], y[0], metric, T))
+                    
+                    try:
+                        db = DBSCAN(eps=eps, min_samples=min_samples, metric='precomputed').fit(custom_dist(X))
+                        labels = db.labels_
+                        cluster_centers = [np.mean(X[labels == i]) for i in set(labels) if i != -1]
+                        
+                        if len(cluster_centers) < 4:
+                            warning_message += " Insufficient clusters. Supplementing with weighted quantiles."
+                            weights = 1 / (sigma + 1e-6)
+                            weighted_quantiles = weighted_quantile(final_prices, [0.15, 0.35, 0.65, 0.85], weights)
+                            cluster_centers.extend(weighted_quantiles)
+                            cluster_centers = np.unique(cluster_centers)[:6]
+                        
+                        levels = np.sort(cluster_centers)
+                    except Exception as e:
+                        st.warning(f"Clustering failed: {e}. Using quantiles.")
+                        levels = np.quantile(final_prices, [0.15, 0.35, 0.65, 0.85])
+                
+                median_of_peaks = np.median(levels)
+                support_levels = levels[levels <= median_of_peaks][:2]
+                resistance_levels = levels[levels > median_of_peaks][-2:]
+                if len(support_levels) < 2 or len(resistance_levels) < 2:
+                    quantiles = np.quantile(final_prices, [0.25, 0.5, 0.75])
+                    support_levels = np.unique(np.sort(np.concatenate([support_levels, quantiles[:2]])))[:2]
+                    resistance_levels = np.unique(np.sort(np.concatenate([resistance_levels, quantiles[1:]])))[-2:]
 
-    with col2:
-        # --- Density and S/R Tables ---
-        st.subheader("Projected S/R Probabilities")
-        epsilon = epsilon_factor * np.std(final_prices)
-        
-        support_probs = get_hit_prob(support_levels, price_grid, u, metric, T, epsilon, geodesic_df)
-        resistance_probs = get_hit_prob(resistance_levels, price_grid, u, metric, T, epsilon, geodesic_df)
-        
-        sub_col1, sub_col2 = st.columns(2)
-        with sub_col1:
-            st.markdown("**Support Levels**")
-            st.dataframe(pd.DataFrame({
-                'Level': support_levels, 
-                'Hit %': support_probs
-            }).style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
+                path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} 
+                             for i in range(min(n_paths, n_display_paths)) for j in range(N)]
+                plot_df = pd.DataFrame(path_data)
+                if not geodesic_df.empty:
+                    plot_df = pd.concat([plot_df, geodesic_df])
+                
+                if plot_df.empty or plot_df[['Time', 'Price']].isna().any().any():
+                    st.error("Main chart data is empty or contains NaN values. Cannot render plot.")
+                else:
+                    support_df = pd.DataFrame({"Price": support_levels})
+                    resistance_df = pd.DataFrame({"Price": resistance_levels})
+                    base = alt.Chart(plot_df).encode(
+                        x=alt.X("Time:Q", title="Time (hours)"),
+                        y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False))
+                    )
+                    path_lines = base.mark_line(opacity=0.2).encode(
+                        color=alt.value('gray'), detail='Path:N'
+                    ).transform_filter(alt.datum.Path != "Geodesic")
+                    geodesic_line = base.mark_line(strokeWidth=3, color="red").transform_filter(alt.datum.Path == "Geodesic")
+                    support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
+                    resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
+                    chart = (path_lines + geodesic_line + support_lines + resistance_lines).properties(
+                        title="Price Paths, Geodesic, and S/R Grid", height=500
+                    ).interactive()
+                    try:
+                        st.altair_chart(chart, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Failed to render main chart: {e}")
 
-        with sub_col2:
-            st.markdown("**Resistance Levels**")
-            st.dataframe(pd.DataFrame({
-                'Level': resistance_levels, 
-                'Hit %': resistance_probs
-            }).style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
+        with col2:
+            st.subheader("Projected S/R Probabilities")
+            epsilon = epsilon_factor * np.std(final_prices)
+            if np.isnan(epsilon):
+                st.error("Invalid epsilon value for probability zones. Cannot compute probabilities.")
+            else:
+                support_probs = get_hit_prob(support_levels, price_grid, u, metric, T, epsilon, geodesic_df)
+                resistance_probs = get_hit_prob(resistance_levels, price_grid, u, metric, T, epsilon, geodesic_df)
+                
+                sub_col1, sub_col2 = st.columns(2)
+                with sub_col1:
+                    st.markdown("**Support Levels**")
+                    support_data = pd.DataFrame({'Level': support_levels, 'Hit %': support_probs})
+                    if support_data.empty or support_data.isna().any().any():
+                        st.warning("Support levels data is empty or contains NaN values.")
+                    else:
+                        st.dataframe(support_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
 
-        with st.expander("Tune Probability Range Factor", expanded=True):
-            st.markdown("""
-            Adjust the 'Probability Range Factor' in the sidebar to control the width of S/R zones.  
-            - Smaller values create tighter, more precise zones.  
-            - Larger values capture more probability but may overlap.  
-            **Recommended range: 0.3–0.7.** Watch how the shaded areas respond below.
-            """)
-            interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon)
-            st.plotly_chart(interactive_density_fig, use_container_width=True)
-            if warning_message:
-                st.info(warning_message)
+                with sub_col2:
+                    st.markdown("**Resistance Levels**")
+                    resistance_data = pd.DataFrame({'Level': resistance_levels, 'Hit %': resistance_probs})
+                    if resistance_data.empty or resistance_data.isna().any().any():
+                        st.warning("Resistance levels data is empty or contains NaN values.")
+                    else:
+                        st.dataframe(resistance_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
+
+                with st.expander("Tune Probability Range Factor", expanded=True):
+                    st.markdown("""
+                    Adjust the 'Probability Range Factor' to control S/R zone width.  
+                    - Smaller values: tighter zones.  
+                    - Larger values: broader zones.  
+                    **Recommended: 0.3–0.7.**
+                    """)
+                    interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon)
+                    if interactive_density_fig:
+                        try:
+                            st.plotly_chart(interactive_density_fig, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"Failed to render density chart: {e}")
+                    if warning_message:
+                        st.info(warning_message)
     
-    # --- Volume Profile ---
-    st.header("Historical Context: Volume-by-Price Analysis")
-    st.markdown("""
-    This chart shows historical trading activity by price level. High-volume areas act as 'gravity,' often serving as strong support or resistance.  
-    Compare these zones with the simulated S/R levels above. Overlapping levels indicate high-conviction price zones.  
-    *The red dashed line marks the Point of Control (POC), the most traded price.*
-    """)
-    volume_profile_fig, poc = create_volume_profile_chart(df)
-    st.plotly_chart(volume_profile_fig, use_container_width=True)
-    st.metric("Point of Control (POC)", f"${poc['price_bin']:,.2f}")
+        st.header("Historical Context: Volume-by-Price Analysis")
+        st.markdown("""
+        High-volume price levels act as strong support or resistance.  
+        Compare with simulated S/R levels above. Overlapping levels indicate high-conviction zones.  
+        *Red dashed line: Point of Control (POC), the most traded price.*
+        """)
+        volume_profile_fig, poc = create_volume_profile_chart(df)
+        if volume_profile_fig and poc is not None:
+            try:
+                st.plotly_chart(volume_profile_fig, use_container_width=True)
+                st.metric("Point of Control (POC)", f"${poc['price_bin']:,.2f}")
+            except Exception as e:
+                st.error(f"Failed to render volume profile chart: {e}")
 
-    # --- Export Option ---
-    st.markdown("### Export Results")
-    export_button = st.button("Download Charts and Data")
-    if export_button:
-        with st.spinner("Generating exports..."):
-            chart.save("main_chart.html")
-            with open("main_chart.html", "rb") as f:
-                st.download_button("Download Main Chart", f, file_name="main_chart.html")
-            interactive_density_fig.write_html("density_chart.html")
-            with open("density_chart.html", "rb") as f:
-                st.download_button("Download Density Chart", f, file_name="density_chart.html")
-            volume_profile_fig.write_html("volume_profile.html")
-            with open("volume_profile.html", "rb") as f:
-                st.download_button("Download Volume Profile", f, file_name="volume_profile.html")
-            sr_data = pd.concat([
-                pd.DataFrame({'Type': 'Support', 'Level': support_levels, 'Hit %': support_probs}),
-                pd.DataFrame({'Type': 'Resistance', 'Level': resistance_levels, 'Hit %': resistance_probs})
-            ])
-            st.download_button("Download S/R Data", sr_data.to_csv(index=False), file_name="sr_levels.csv")
+        st.markdown("### Export Results")
+        export_button = st.button("Download Charts and Data")
+        if export_button:
+            with st.spinner("Generating exports..."):
+                try:
+                    chart.save("main_chart.html")
+                    with open("main_chart.html", "rb") as f:
+                        st.download_button("Download Main Chart", f, file_name="main_chart.html")
+                except Exception as e:
+                    st.warning(f"Failed to export main chart: {e}")
+                if interactive_density_fig:
+                    interactive_density_fig.write_html("density_chart.html")
+                    with open("density_chart.html", "rb") as f:
+                        st.download_button("Download Density Chart", f, file_name="density_chart.html")
+                if volume_profile_fig:
+                    volume_profile_fig.write_html("volume_profile.html")
+                    with open("volume_profile.html", "rb") as f:
+                        st.download_button("Download Volume Profile", f, file_name="volume_profile.html")
+                sr_data = pd.concat([
+                    pd.DataFrame({'Type': 'Support', 'Level': support_levels, 'Hit %': support_probs}),
+                    pd.DataFrame({'Type': 'Resistance', 'Level': resistance_levels, 'Hit %': resistance_probs})
+                ])
+                st.download_button("Download S/R Data", sr_data.to_csv(index=False), file_name="sr_levels.csv")
 
 else:
-    st.error("Could not load or process data. Please check parameters, ensure internet connectivity, or try again later.")
+    st.error("Could not load or process data. Check parameters, internet, or try again.")
 
 # --- Custom CSS for Tooltips ---
 st.markdown("""
