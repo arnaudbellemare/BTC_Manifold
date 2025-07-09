@@ -141,7 +141,10 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
     fig = go.Figure()
 
     # Add the probability range rectangle first, so it's in the background
-    if prob_range and all(pd.notna(prob_range)) and confidence_level is not None:
+    # --- FIX START ---
+    # The original code had `all(pd.notna(prob_range))`, which fails because prob_range is a tuple.
+    # The corrected code checks each element of the tuple individually.
+    if prob_range and confidence_level is not None and pd.notna(prob_range[0]) and pd.notna(prob_range[1]):
         lower, upper = prob_range
         fig.add_vrect(x0=lower, x1=upper,
                       fillcolor="rgba(255, 255, 0, 0.2)", # A light yellow
@@ -149,6 +152,7 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
                       annotation_text=f"{confidence_level:.0%} Prob. Range",
                       annotation_position="top left",
                       annotation_font_size=12)
+    # --- FIX END ---
 
     fig.add_trace(go.Scatter(x=price_grid, y=density, mode='lines', name='Probability Density',
                             fill='tozeroy', line_color='lightblue', hovertemplate='Price: $%{x:,.2f}<br>Density: %{y:.4f}'))
@@ -171,7 +175,6 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
         height=400
     )
     return fig
-
 def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, n_bins=100):
     if df.empty or 'close' not in df or 'volume' not in df:
         st.error("Volume profile data is invalid or empty.")
