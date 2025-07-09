@@ -560,6 +560,34 @@ if df is not None and len(df) > 10:
                 volatility_adjustment = np.interp(linear_times, times, sigma)
                 adjusted_prices = linear_prices * (1 + 0.1 * volatility_adjustment)
                 geodesic_df = pd.DataFrame({"Time": linear_times, "Price": adjusted_prices, "Path": "Geodesic"})
+        if not geodesic_df.empty:
+            # Prepare historical price data for plotting
+            price_df = pd.DataFrame({
+                "Time": times,
+                "Price": prices,
+                "Path": "Historical Price"
+            })
+            # Combine historical and geodesic data
+            combined_df = pd.concat([price_df, geodesic_df], ignore_index=True)
+            # Create base chart with both historical price and geodesic path
+            base = alt.Chart(combined_df).encode(
+                x=alt.X("Time:Q", title="Time (days)"),
+                y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False)),
+                color=alt.Color("Path:N", title="Path Type", scale=alt.Scale(domain=["Historical Price", "Geodesic"], range=["blue", "red"]))
+            )
+            price_line = base.mark_line(strokeWidth=2).encode(detail='Path:N')
+            # Add S/R lines
+            support_df = pd.DataFrame({"Price": support_levels})
+            resistance_df = pd.DataFrame({"Price": resistance_levels})
+            support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
+            resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
+            chart = (price_line + support_lines + resistance_lines).properties(
+                title="Price Path, Geodesic, and S/R Grid", height=500
+            ).interactive()
+            try:
+                st.altair_chart(chart, use_container_width=True)
+            except Exception as e:
+                st.error(f"Failed to render price path chart: {e}")
     if sel_expiry and run_btn:
         st.header("Options-Based S/R Analysis (SVI)")
         with st.spinner("Fetching options data..."):
