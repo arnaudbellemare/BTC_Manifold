@@ -203,7 +203,7 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, 
                   line=dict(color="orange", width=2, dash="dash"))
     # Add current price line in light blue
     if current_price and not np.isnan(current_price):
-        fig.add_hline(y=current_price, line_color='lightblue', line_width=2, line_dash='solid',
+        fig.add_hline(y=current_price, line_color='blue', line_width=2, line_dash='solid',
                       annotation_text="Current Price", annotation_position="top right")
     # Add S/R levels
     for level in s_levels:
