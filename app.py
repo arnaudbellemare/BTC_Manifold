@@ -158,11 +158,11 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
     
     for level in s_levels:
         fig.add_vrect(x0=level - epsilon, x1=level + epsilon, fillcolor="green", opacity=0.2, 
-                      layer="below", line_width=0, annotation_text="Support", annotation_position="top left")
+                      layer="below", line_width=0)
         fig.add_vline(x=level, line_color='green', line_dash='dash')
     for level in r_levels:
         fig.add_vrect(x0=level - epsilon, x1=level + epsilon, fillcolor="red", opacity=0.2, 
-                      layer="below", line_width=0, annotation_text="Resistance", annotation_position="top left")
+                      layer="below", line_width=0)
         fig.add_vline(x=level, line_color='red', line_dash='dash')
         
     fig.update_layout(
