@@ -15,7 +15,6 @@ from scipy.interpolate import interp1d
 from scipy.optimize import minimize
 from sklearn.cluster import DBSCAN
 import warnings
-from joblib import Parallel, delayed
 import requests
 from datetime import datetime, timezone, timedelta
 import re
@@ -28,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 st.set_page_config(layout="wide")
 st.title("BTC/USD Price and Options-Based S/R Analysis on a Volatility-Weighted Manifold")
 st.markdown("""
-This application models the Bitcoin market as a 2D geometric space (manifold) of (Time, Log-Price), warped by GARCH-derived volatility, with support/resistance (S/R) levels derived from options data using the SVI model.  
+This application models the Bitcoin market as a 2D geometric space (manifold) of (Time, Log-Price), warped by options-implied volatility, with support/resistance (S/R) levels derived from the SVI model.  
 - **Geodesic (Red Line):** The "straightest" path through the volatility landscape.  
 - **S/R Grid:** Support (green) and resistance (red) levels from the SVI implied probability density.  
 - **Volume Profile:** Historical trading activity with S/R levels, POC (orange), and current price (light blue).  
@@ -311,9 +310,12 @@ class BlackScholes:
         self.r = float(interest_rate)
         self.sigma_sqrt_T = self.sigma * np.sqrt(self.T)
         if self.sigma_sqrt_T < 1e-9:
-            if self.S > self.K: self.d1, self.d2 = np.inf, np.inf
-            elif self.S < self.K: self.d1, self.d2 = -np.inf, -np.inf
-            else: self.d1, self.d2 = 0, 0
+            if self.S > self.K:
+                self.d1, self.d2 = np.inf, np.inf
+            elif self.S < self.K:
+                self.d1, self.d2 = -np.inf, -np.inf
+            else:
+                self.d1, self.d2 = 0, 0
         else:
             self.d1 = (np.log(self.S / self.K) + (self.r + 0.5 * self.sigma**2) * self.T) / self.sigma_sqrt_T
             self.d2 = self.d1 - self.sigma_sqrt_T
@@ -402,7 +404,7 @@ def calibrate_raw_svi(market_ivs, market_strikes, F, T, initial_params_dict=None
     bounds = [(None, None), (1e-5, 2.0/T if T > 0 else 20.0), (-0.999, 0.999), (-2.0, 2.0), (1e-4, 3.0)]
     result = minimize(svi_objective_function, p0, args=(market_ivs, market_ks, T, F, weights),
                      method='L-BFGS-B', bounds=bounds, options={'ftol': 1e-8, 'gtol': 1e-6, 'maxiter': 500})
-    if result.success or result.status in [0,1,2]:
+    if result.success or result.status in [0, 1, 2]:
         cal_p = {'a': result.x[0], 'b': result.x[1], 'rho': result.x[2], 'm': result.x[3], 'sigma': result.x[4]}
         logging.info(f"SVI Calibration Success: {result.message}, Error: {result.fun:.2e}, Params: {cal_p}")
         return cal_p, result.fun
@@ -449,7 +451,7 @@ with st.spinner("Fetching Kraken BTC/USD data..."):
 if df is not None and len(df) > 10:
     prices = df['close'].values
     times_pd = df['datetime']
-    times = (times_pd - times_pd.iloc[0]).dt.total_seconds() / 3600
+    times = (times_pd - times_pd.iloc[0]).dt.total_seconds() / (24 * 3600)  # Convert to days
     T = times.iloc[-1] if not times.empty else 0
     N = len(prices)
     p0 = prices[0]
@@ -476,7 +478,7 @@ if df is not None and len(df) > 10:
                 recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
                 y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
                 t_eval = np.linspace(0, T, min(N, 100))
-                metric = VolatilityMetric(sigma, t, T)
+                metric = VolatilityMetric(sigma, times, T)
                 try:
                     sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), t_eval=t_eval, rtol=1e-5, method='Radau')
                     geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
@@ -484,26 +486,12 @@ if df is not None and len(df) > 10:
                     st.warning("Geodesic computation failed. Using linear path.")
                     linear_times = np.linspace(0, T, min(N, 100))
                     linear_prices = np.linspace(p0, prices[-1], min(N, 100))
-                    volatility_adjustment = np.interp(linear_times, t, sigma)
+                    volatility_adjustment = np.interp(linear_times, times, sigma)
                     adjusted_prices = linear_prices * (1 + 0.1 * volatility_adjustment)
                     geodesic_df = pd.DataFrame({"Time": linear_times, "Price": adjusted_prices, "Path": "Geodesic"})
-            if not geodesic_df.empty:
-                base = alt.Chart(geodesic_df).encode(
-                    x=alt.X("Time:Q", title="Time (hours)"),
-                    y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False))
-                )
-                geodesic_line = base.mark_line(strokeWidth=3, color="red").encode(detail='Path:N')
-                chart = geodesic_line.properties(title="Price Path and Geodesic", height=500).interactive()
-                try:
-                    st.altair_chart(chart, use_container_width=True)
-                except Exception as e:
-                    st.error(f"Failed to render price path chart: {e}")
-            else:
-                st.error("Geodesic path is empty.")
-
         # --- Options Analysis ---
         if sel_expiry:
-            st.header("Options-Based S/R Analysis")
+            st.header("Options-Based S/R Analysis (SVI)")
             with st.spinner("Fetching options data..."):
                 df_options = get_thalex_options_data(coin, sel_expiry, all_instruments)
             if df_options is not None and not df_options.empty:
@@ -514,6 +502,20 @@ if df is not None and len(df) > 10:
                 perp_ticker = get_thalex_ticker(f"{coin}-PERPETUAL")
                 spot_price = float(perp_ticker['mark_price']) if perp_ticker and perp_ticker.get('mark_price') else current_price
                 forward_price = spot_price * np.exp(r_rate * ttm)
+                # Use ATM IV from options data as volatility for manifold
+                atm_iv = df_options.iloc[(df_options['strike'] - forward_price).abs().argsort()[:1]]['iv'].iloc[0]
+                if pd.isna(atm_iv) or atm_iv <= 0:
+                    atm_iv = 0.5  # Fallback
+                sigma_options = np.full_like(times, atm_iv)  # Constant IV over TTM
+                metric = VolatilityMetric(sigma_options, times, ttm)
+                with col1:
+                    if not geodesic_df.empty:
+                        base = alt.Chart(geodesic_df).encode(
+                            x=alt.X("Time:Q", title="Time (days)"),
+                            y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False))
+                        )
+                        geodesic_line = base.mark_line(strokeWidth=3, color="red").encode(detail='Path:N')
+                        # S/R levels will be added after computing from SVI
                 with st.spinner("Calibrating SVI model..."):
                     market_strikes = df_options['strike'].values
                     market_ivs = df_options['iv'].values
