@@ -12,6 +12,8 @@ from scipy.integrate import solve_ivp
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
 from scipy.interpolate import interp1d
+from sklearn.cluster import DBSCAN
+from sklearn.metrics import pairwise_distances
 import warnings
 from joblib import Parallel, delayed
 import streamlit.components.v1 as components
@@ -36,14 +38,13 @@ class VolatilityMetric(RiemannianMetric):
         super().__init__(space=space)
         self.sigma = sigma
         self.t = t
-        self.T = max(T, 1e-6)  # Prevent division by zero
-        # Interpolate sigma for smoother derivatives
+        self.T = max(T, 1e-6)
         self.sigma_interp = interp1d(t, sigma, bounds_error=False, fill_value=(sigma[0], sigma[-1]))
 
     def metric_matrix(self, base_point):
         t_val = base_point[0]
-        sigma_val = max(self.sigma_interp(t_val), 1e-6)  # Ensure positive definiteness
-        return np.diag([1.0, sigma_val**2])
+        sigma_val = max(self.sigma_interp(t_val), 1e-6)  # Use interpolated GARCH volatility
+        return np.diag([1.0, sigma_val**2]) + 1e-6 * np.eye(2)  # Ensure positive definiteness
 
     def christoffel_symbols(self, base_point):
         t_val = base_point[0]
@@ -62,7 +63,7 @@ class VolatilityMetric(RiemannianMetric):
 def fetch_kraken_data(symbol, timeframe, start_date, end_date):
     exchange = ccxt.kraken()
     since = int(start_date.timestamp() * 1000)
-    timeframe_seconds = 3600  # 1h timeframe
+    timeframe_seconds = 3600
     all_ohlcv = []
     max_retries = 3
     
@@ -123,6 +124,33 @@ def simulate_paths(p0, mu, sigma, T, N, n_paths):
     t = np.linspace(0, T, N)
     paths = Parallel(n_jobs=-1)(delayed(simulate_single_path)(p0, mu, sigma, T, N, dt, i) for i in range(n_paths))
     return np.array(paths), t
+
+def get_hit_prob(level_list, price_grid, u, metric, T, epsilon, geodesic_prices):
+    probs = []
+    total_prob = np.trapz(u, price_grid)  # Total probability for normalization
+    for level in level_list:
+        mask = (price_grid >= level - epsilon) & (price_grid <= level + epsilon)
+        raw_prob = np.trapz(u[mask], price_grid[mask])  # Local probability
+        # Stabilize volume element
+        metric_mat = metric.metric_matrix([T, level])
+        det = max(np.abs(np.linalg.det(metric_mat)), 1e-6)  # Ensure positive and non-zero
+        volume_element = np.sqrt(det)
+        # Weight by proximity to geodesic
+        geodesic_price = np.interp(T, geodesic_prices["Time"], geodesic_prices["Price"])
+        geodesic_weight = np.exp(-np.abs(level - geodesic_price) / (2 * epsilon))
+        prob = raw_prob * volume_element * geodesic_weight
+        probs.append(prob)
+    # Normalize probabilities to sum to 1 across all levels
+    total_level_prob = sum(probs) + 1e-10
+    return [p / total_level_prob for p in probs] if total_level_prob > 0 else [0] * len(level_list)
+
+def manifold_distance(x, y, metric, T):
+    """Compute distance on the volatility-weighted manifold."""
+    point_x = np.array([T, x])
+    point_y = np.array([T, y])
+    metric_mat = metric.metric_matrix([T, (x + y) / 2])  # Average point for metric
+    delta = point_x - point_y
+    return np.sqrt(max(delta.T @ metric_mat @ delta, 1e-6))
 
 def create_interactive_density_chart(price_grid, density, s_levels, r_levels, epsilon):
     fig = go.Figure()
@@ -187,12 +215,12 @@ n_display_paths = st.sidebar.slider(
     help="Number of simulated paths to show in the main chart. Fewer paths improve visualization performance."
 )
 epsilon_factor = st.sidebar.slider(
-    "Probability Range Factor", 0.05, 1.0, 0.25, step=0.05, 
+    "Probability Range Factor", 0.1, 2.0, 0.5, step=0.05, 
     help="Controls the width of S/R probability zones. Smaller values create tighter zones; larger values capture more probability."
 )
 reset_button = st.sidebar.button("Reset to Defaults")
 if reset_button:
-    days_history, n_paths, n_display_paths, epsilon_factor = 30, 2000, 50, 0.25
+    days_history, n_paths, n_display_paths, epsilon_factor = 30, 2000, 50, 0.5
 
 end_date = pd.Timestamp.now(tz='UTC')
 start_date = end_date - pd.Timedelta(days=days_history)
@@ -211,7 +239,7 @@ if df is not None and len(df) > 10:
     with st.spinner("Fitting GARCH model..."):
         try:
             model = arch_model(returns, vol='Garch', p=1, q=1).fit(disp='off')
-            sigma = model.conditional_volatility / 100
+            sigma = model.conditional_volatility / 100  # GARCH volatility in decimal
             sigma = np.pad(sigma, (N - len(sigma), 0), mode='edge')
         except Exception:
             st.warning("GARCH fitting failed. Using empirical volatility.")
@@ -225,42 +253,67 @@ if df is not None and len(df) > 10:
     with col1:
         # --- Main Chart ---
         final_prices = paths[:, -1]
-        kde = gaussian_kde(final_prices)
+        price_std = np.std(final_prices)
+        price_mean = np.mean(final_prices)
+        kde = gaussian_kde(final_prices, bw_method='scott')
+        kde.set_bandwidth(bw_method=kde.factor * (1.5 if price_std / price_mean < 0.02 else 1.0))
         price_grid = np.linspace(final_prices.min(), final_prices.max(), 500)
         u = kde(price_grid)
-        u /= np.trapz(u, price_grid) + 1e-10  # Ensure normalization
-        # Dynamic peak detection
-        peak_height = 0.05 * u.max()
-        peak_distance = max(10, len(price_grid) // (25 + int(np.std(final_prices) / np.mean(final_prices) * 10)))
-        peaks, _ = find_peaks(u, height=peak_height, distance=peak_distance)
-        levels = price_grid[peaks]
-        
-        warning_message = None
-        if len(levels) < 4:
-            warning_message = "Few distinct peaks found. Using quantiles for S/R grid due to strong trend or low volatility."
-            support_levels = np.quantile(final_prices, [0.15, 0.40])
-            resistance_levels = np.quantile(final_prices, [0.60, 0.85])
-        else:
-            median_of_peaks = np.median(levels)
-            support_levels = levels[levels <= median_of_peaks]
-            resistance_levels = levels[levels > median_of_peaks]
-            if len(resistance_levels) == 0 and len(support_levels) > 1:
-                resistance_levels = np.array([support_levels[-1]])
-                support_levels = support_levels[:-1]
-            if len(support_levels) == 0 and len(resistance_levels) > 1:
-                support_levels = np.array([resistance_levels[0]])
-                resistance_levels = resistance_levels[1:]
-        
+        u /= np.trapz(u, price_grid) + 1e-10
+
+        # Weight density by proximity to geodesic
         with st.spinner("Computing geodesic path..."):
             delta_p = prices[-1] - p0
-            # Adaptive initial velocity based on recent trend
             recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
             y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
-            t_eval = np.linspace(0, T, min(N, 100))  # Reduce integration points
-            sol = solve_ivp(geodesic_equation, [0, T], y0, args=(VolatilityMetric(sigma, t, T),), 
-                           t_eval=t_eval, rtol=1e-5, method='RK23')
+            t_eval = np.linspace(0, T, min(N, 100))
+            metric = VolatilityMetric(sigma, t, T)
+            sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), 
+                           t_eval=t_eval, rtol=1e-5, method='DOP853')
             geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
         
+        geodesic_price = np.interp(T, geodesic_df["Time"], geodesic_df["Price"])
+        geodesic_weights = np.exp(-np.abs(price_grid - geodesic_price) / (2 * price_std))
+        u_weighted = u * geodesic_weights
+        peak_height = 0.05 * u_weighted.max()
+        peak_distance = max(5, len(price_grid) // (30 + int(price_std / price_mean * 15)))
+        peaks, _ = find_peaks(u_weighted, height=peak_height, distance=peak_distance)
+        if len(peaks) < 4:
+            peaks, _ = find_peaks(u_weighted, height=0.01 * u_weighted.max(), distance=peak_distance // 2)
+        levels = price_grid[peaks]
+
+        warning_message = None
+        if len(peaks) < 4:
+            warning_message = "Insufficient peaks detected. Using manifold-informed clustering."
+            X = final_prices.reshape(-1, 1)
+            sigma_T = max(metric.sigma_interp(T), 1e-6)
+            eps = sigma_T * np.std(final_prices) * 0.1  # Scale by volatility
+            min_samples = max(5, n_paths // 200)
+            
+            def custom_dist(X):
+                return pairwise_distances(X, metric=lambda x, y: manifold_distance(x[0], y[0], metric, T))
+            
+            db = DBSCAN(eps=eps, min_samples=min_samples, metric='precomputed').fit(custom_dist(X))
+            labels = db.labels_
+            cluster_centers = [np.mean(X[labels == i]) for i in set(labels) if i != -1]
+            
+            if len(cluster_centers) < 4:
+                warning_message += " Insufficient clusters. Supplementing with volatility-weighted quantiles."
+                weights = 1 / (sigma + 1e-6)
+                weighted_quantiles = np.quantile(final_prices, [0.15, 0.35, 0.65, 0.85], weights=weights/np.sum(weights))
+                cluster_centers.extend(weighted_quantiles)
+                cluster_centers = np.unique(cluster_centers)[:6]
+            
+            levels = np.sort(cluster_centers)
+        
+        median_of_peaks = np.median(levels)
+        support_levels = levels[levels <= median_of_peaks][:2]
+        resistance_levels = levels[levels > median_of_peaks][-2:]
+        if len(support_levels) < 2 or len(resistance_levels) < 2:
+            quantiles = np.quantile(final_prices, [0.25, 0.5, 0.75])
+            support_levels = np.unique(np.sort(np.concatenate([support_levels, quantiles[:2]])))[:2]
+            resistance_levels = np.unique(np.sort(np.concatenate([resistance_levels, quantiles[1:]])))[-2:]
+
         path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"} 
                      for i in range(min(n_paths, n_display_paths)) for j in range(N)]
         plot_df = pd.concat([pd.DataFrame(path_data), geodesic_df])
@@ -286,24 +339,8 @@ if df is not None and len(df) > 10:
         st.subheader("Projected S/R Probabilities")
         epsilon = epsilon_factor * np.std(final_prices)
         
-        metric = VolatilityMetric(sigma, t, T)
-        def get_hit_prob(level_list, price_grid, u, metric, T, epsilon, geodesic_prices):
-            probs = []
-            total_prob = np.trapz(u, price_grid)
-            for level in level_list:
-                mask = (price_grid >= level - epsilon) & (price_grid <= level + epsilon)
-                raw_prob = np.trapz(u[mask], price_grid[mask])
-                metric_mat = metric.metric_matrix([T, level])
-                det = max(np.abs(np.linalg.det(metric_mat)), 1e-6)
-                volume_element = np.sqrt(det)
-                geodesic_price = np.interp(T, geodesic_df["Time"], geodesic_df["Price"])
-                geodesic_weight = np.exp(-np.abs(level - geodesic_price) / (2 * epsilon))
-                prob = raw_prob * volume_element * geodesic_weight
-                probs.append(prob)
-            total_level_prob = sum(probs) + 1e-10
-            return [p / total_level_prob for p in probs] if total_level_prob > 0 else [0] * len(level_list)
-        support_probs = get_hit_prob(support_levels)
-        resistance_probs = get_hit_prob(resistance_levels)
+        support_probs = get_hit_prob(support_levels, price_grid, u, metric, T, epsilon, geodesic_df)
+        resistance_probs = get_hit_prob(resistance_levels, price_grid, u, metric, T, epsilon, geodesic_df)
         
         sub_col1, sub_col2 = st.columns(2)
         with sub_col1:
@@ -325,7 +362,7 @@ if df is not None and len(df) > 10:
             Adjust the 'Probability Range Factor' in the sidebar to control the width of S/R zones.  
             - Smaller values create tighter, more precise zones.  
             - Larger values capture more probability but may overlap.  
-            **Recommended range: 0.2–0.5.** Watch how the shaded areas respond below.
+            **Recommended range: 0.3–0.7.** Watch how the shaded areas respond below.
             """)
             interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon)
             st.plotly_chart(interactive_density_fig, use_container_width=True)
@@ -348,19 +385,15 @@ if df is not None and len(df) > 10:
     export_button = st.button("Download Charts and Data")
     if export_button:
         with st.spinner("Generating exports..."):
-            # Export main chart as HTML
             chart.save("main_chart.html")
             with open("main_chart.html", "rb") as f:
                 st.download_button("Download Main Chart", f, file_name="main_chart.html")
-            # Export density chart
             interactive_density_fig.write_html("density_chart.html")
             with open("density_chart.html", "rb") as f:
                 st.download_button("Download Density Chart", f, file_name="density_chart.html")
-            # Export volume profile
             volume_profile_fig.write_html("volume_profile.html")
             with open("volume_profile.html", "rb") as f:
                 st.download_button("Download Volume Profile", f, file_name="volume_profile.html")
-            # Export S/R data
             sr_data = pd.concat([
                 pd.DataFrame({'Type': 'Support', 'Level': support_levels, 'Hit %': support_probs}),
                 pd.DataFrame({'Type': 'Resistance', 'Level': resistance_levels, 'Hit %': resistance_probs})
