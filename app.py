@@ -713,6 +713,7 @@ if df is not None and len(df) > 10:
                 support_levels = levels[levels <= median_of_peaks][:2]
                 resistance_levels = levels[levels > median_of_peaks][-2:]
                 # Plot Price Path with S/R
+                # Plot Price Path with S/R
                 with col1:
                     if not geodesic_df.empty:
                         # Prepare historical price data for plotting
@@ -727,7 +728,7 @@ if df is not None and len(df) > 10:
                         base = alt.Chart(combined_df).encode(
                             x=alt.X("Time:Q", title="Time (days)"),
                             y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False)),
-                            color=alt.Color("Path:N", title="Path Type", scale=alt.Scale(domain=["Historical Price", "Geodesic"], range=["blue", "orange"]))
+                            color=alt.Color("Path:N", title="Path Type", scale=alt.Scale(domain=["Historical Price", "Geodesic"], range=["blue", "red"]))
                         )
                         price_line = base.mark_line(strokeWidth=2).encode(detail='Path:N')
                         # Add S/R lines
@@ -735,9 +736,34 @@ if df is not None and len(df) > 10:
                         resistance_df = pd.DataFrame({"Price": resistance_levels})
                         support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
                         resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
-                        chart = (price_line + support_lines + resistance_lines).properties(
-                            title="Price Path, Geodesic, and S/R Grid", height=500
+                        
+                        # --- CHANGE START ---
+                        # Create the chart layer for the probability range band
+                        prob_band_chart = alt.Chart() # Start with an empty chart layer
+                        
+                        # Only add the band if the probability range is valid
+                        if pd.notna(lower_prob_range) and pd.notna(upper_prob_range):
+                            prob_range_df = pd.DataFrame([{
+                                'lower_bound': lower_prob_range,
+                                'upper_bound': upper_prob_range,
+                                'label': f"{confidence_level:.0%} Range"
+                            }])
+                            
+                            prob_band_chart = alt.Chart(prob_range_df).mark_rect(
+                                opacity=0.2,
+                                color='yellow'
+                            ).encode(
+                                y='lower_bound:Q',
+                                y2='upper_bound:Q'
+                            )
+
+                        # Combine all layers, putting the probability band in the background first
+                        chart = (prob_band_chart + price_line + support_lines + resistance_lines).properties(
+                            title=f"Price Path, Geodesic, and {confidence_level:.0%} Probability Range",
+                            height=500
                         ).interactive()
+                        # --- CHANGE END ---
+                        
                         try:
                             st.altair_chart(chart, use_container_width=True)
                         except Exception as e:
