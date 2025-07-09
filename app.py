@@ -750,7 +750,7 @@ if df is not None and len(df) > 10:
                             }])
                             
                             prob_band_chart = alt.Chart(prob_range_df).mark_rect(
-                                opacity=0.2,
+                                opacity=0.1,
                                 color='yellow'
                             ).encode(
                                 y='lower_bound:Q',
