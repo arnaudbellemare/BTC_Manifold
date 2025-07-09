@@ -25,8 +25,8 @@ st.title("BTC/USD Price Analysis on a Volatility-Weighted Manifold")
 st.markdown("""
 This application models the Bitcoin market as a 2D geometric space (manifold) of (Time, Log-Price), warped by GARCH-derived volatility.  
 - **Geodesic (Red Line):** The "straightest" path through the volatility landscape.  
-- **S/R Grid:** Support (green) and resistance (red) levels derived from Monte Carlo simulations.  
-- **Volume Profile:** Historical trading activity, highlighting high-volume price levels.  
+- **S/R Grid:** Support (green) and resistance (red) levels derived from Monte Carlo simulations, shown on main and volume profile charts.  
+- **Volume Profile:** Historical trading activity with S/R levels, highlighting high-volume price zones.  
 *Use the sidebar to adjust parameters and explore interactively. Hover over charts for details.*
 """)
 
@@ -176,7 +176,7 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
     )
     return fig
 
-def create_volume_profile_chart(df, n_bins=100):
+def create_volume_profile_chart(df, s_levels, r_levels, epsilon, n_bins=100):
     if df.empty or 'close' not in df or 'volume' not in df:
         st.error("Volume profile data is invalid or empty. Cannot render plot.")
         return None, None
@@ -200,8 +200,17 @@ def create_volume_profile_chart(df, n_bins=100):
     ))
     fig.add_shape(type="line", y0=poc['price_bin'], y1=poc['price_bin'], x0=0, x1=poc['volume'], 
                   line=dict(color="red", width=2, dash="dash"))
+    # Add S/R levels
+    for level in s_levels:
+        fig.add_hrect(y0=level - epsilon, y1=level + epsilon, fillcolor="green", opacity=0.2, 
+                      layer="below", line_width=0, annotation_text="Support", annotation_position="top left")
+        fig.add_hline(y=level, line_color='green', line_dash='dash')
+    for level in r_levels:
+        fig.add_hrect(y0=level - epsilon, y1=level + epsilon, fillcolor="red", opacity=0.2, 
+                      layer="below", line_width=0, annotation_text="Resistance", annotation_position="top left")
+        fig.add_hline(y=level, line_color='red', line_dash='dash')
     fig.update_layout(
-        title="Historical Volume Profile",
+        title="Historical Volume Profile with S/R Zones",
         xaxis_title="Volume Traded",
         yaxis_title="Price (USD)",
         template="plotly_white",
@@ -274,7 +283,7 @@ if df is not None and len(df) > 10:
             else:
                 kde = gaussian_kde(final_prices, bw_method='scott')
                 kde.set_bandwidth(bw_method=kde.factor * (1.5 if price_std / price_mean < 0.02 else 1.0))
-                price_grid = np.linspace(final_prices.min(), final_prices.max(), 1000)  # Finer grid
+                price_grid = np.linspace(final_prices.min(), final_prices.max(), 1000)
                 u = kde(price_grid)
                 u /= np.trapz(u, price_grid) + 1e-10
 
@@ -298,11 +307,10 @@ if df is not None and len(df) > 10:
                 geodesic_price = np.interp(T, geodesic_df["Time"], geodesic_df["Price"]) if not geodesic_df.empty else price_mean
                 geodesic_weights = np.exp(-np.abs(price_grid - geodesic_price) / (2 * price_std))
                 u_weighted = u * geodesic_weights
-                # Smooth density for better peak detection
                 from scipy.ndimage import gaussian_filter1d
                 u_smooth = gaussian_filter1d(u_weighted, sigma=2)
                 peak_height = 0.05 * u_smooth.max()
-                peak_distance = max(10, len(price_grid) // 50)  # Adjusted for finer grid
+                peak_distance = max(10, len(price_grid) // 50)
                 peaks, _ = find_peaks(u_smooth, height=peak_height, distance=peak_distance)
                 if len(peaks) < 4:
                     peaks, _ = find_peaks(u_smooth, height=0.01 * u_smooth.max(), distance=peak_distance // 2)
@@ -311,33 +319,27 @@ if df is not None and len(df) > 10:
                 warning_message = None
                 if len(peaks) < 4:
                     warning_message = "Insufficient peaks detected. Using grid-based density clustering."
-                    # Grid-based density clustering
                     try:
-                        # Create histogram on price grid
                         hist, bin_edges = np.histogram(final_prices, bins=100, density=True)
                         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-                        # Smooth histogram
                         hist_smooth = gaussian_filter1d(hist, sigma=2)
-                        # Find peaks in smoothed histogram
                         hist_peaks, _ = find_peaks(hist_smooth, height=0.05 * hist_smooth.max(), distance=5)
                         if len(hist_peaks) < 4:
                             hist_peaks, _ = find_peaks(hist_smooth, height=0.01 * hist_smooth.max(), distance=3)
                         cluster_centers = bin_centers[hist_peaks]
                         if len(cluster_centers) < 4:
-                            # Supplement with highest density points
-                            top_indices = np.argsort(hist_smooth)[-4:]  # Take top 4 density points
+                            top_indices = np.argsort(hist_smooth)[-4:]
                             cluster_centers = np.sort(bin_centers[top_indices])
-                        levels = np.sort(cluster_centers[:6])  # Limit to 6 levels
+                        levels = np.sort(cluster_centers[:6])
                     except Exception as e:
                         st.warning(f"Grid-based clustering failed: {e}. Using density maxima.")
-                        top_indices = np.argsort(u_smooth)[-4:]  # Fallback to top density points
+                        top_indices = np.argsort(u_smooth)[-4:]
                         levels = np.sort(price_grid[top_indices])
                 
                 median_of_peaks = np.median(levels)
                 support_levels = levels[levels <= median_of_peaks][:2]
                 resistance_levels = levels[levels > median_of_peaks][-2:]
                 if len(support_levels) < 2 or len(resistance_levels) < 2:
-                    # Use grid-based density maxima instead of quantiles
                     top_indices = np.argsort(u_smooth)[-4:]
                     extra_levels = np.sort(price_grid[top_indices])
                     support_levels = np.unique(np.sort(np.concatenate([support_levels, extra_levels[:2]])))[:2]
@@ -417,10 +419,10 @@ if df is not None and len(df) > 10:
         st.header("Historical Context: Volume-by-Price Analysis")
         st.markdown("""
         High-volume price levels act as strong support or resistance.  
-        Compare with simulated S/R levels above. Overlapping levels indicate high-conviction zones.  
+        Green (support) and red (resistance) zones show simulated S/R levels. Overlapping levels indicate high-conviction zones.  
         *Red dashed line: Point of Control (POC), the most traded price.*
         """)
-        volume_profile_fig, poc = create_volume_profile_chart(df)
+        volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon)
         if volume_profile_fig and poc is not None:
             try:
                 st.plotly_chart(volume_profile_fig, use_container_width=True)
