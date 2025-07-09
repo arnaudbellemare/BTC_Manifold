@@ -14,31 +14,34 @@ from scipy.signal import find_peaks
 from scipy.interpolate import interp1d
 from scipy.optimize import minimize
 from sklearn.cluster import DBSCAN
-import warnings
 import requests
 from datetime import datetime, timezone, timedelta
 import re
 import logging
 from typing import Optional, Dict, List
 import time
+from statsmodels.tsa.stattools import adfuller
 
 # --- Global Settings ---
-warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
-st.set_page_config(layout="wide")
-st.title("BTC/USD Price and Options-Based S/R Analysis on a Volatility-Weighted Manifold")
+st.set_page_config(layout="wide", page_icon="📊", page_title="BTC Options and Manifold S/R Analysis")
+st.title("BTC/USD Options and Volatility-Weighted Manifold Analysis")
 st.markdown("""
-This application models the Bitcoin market as a 2D geometric space (manifold) of (Time, Log-Price), warped by options-implied volatility, with support/resistance (S/R) levels derived from the SVI model.  
-- **Geodesic (Red Line):** The "straightest" path through the volatility landscape.  
-- **S/R Grid:** Support (green) and resistance (red) levels from the SVI implied probability density.  
-- **Volume Profile:** Historical trading activity with S/R levels, POC (orange), and current price (light blue).  
-- **Options Analysis:** Implied probability density from SVI model, with S/R levels overlaid.  
+This application combines options-based probability analysis with a volatility-weighted manifold model for BTC/USD.  
+- **Options Analysis**: Implied volatility (IV) smiles and probability density functions (PDFs) using SVI model, ensuring no butterfly arbitrage.  
+- **Manifold Analysis**: Models price-time space as a 2D manifold warped by options-implied volatility, with geodesic path (red) and S/R levels (green/red) on the PDF.  
+- **IV/RV & Momentum**: Compares implied vs. realized volatility and includes RSI-based momentum signals.  
+- **Volume Profile**: Historical trading activity with S/R levels and POC.  
 *Use the sidebar to adjust parameters. Hover over charts for details.*
 """)
 
 # --- Thalex API Configuration ---
 THALEX_BASE_URL = "https://thalex.com/api/v2"
 REQUEST_TIMEOUT = 15
+Z_SCORE_HIGH_IV_THRESHOLD = 1.0
+Z_SCORE_LOW_IV_THRESHOLD = -1.0
+RSI_BULLISH_THRESHOLD = 65
+RSI_BEARISH_THRESHOLD = 35
 
 # --- Geometric Modeling Class ---
 class VolatilityMetric(RiemannianMetric):
@@ -73,26 +76,26 @@ class VolatilityMetric(RiemannianMetric):
 def fetch_kraken_data(symbol, timeframe, start_date, end_date):
     exchange = ccxt.kraken()
     since = int(start_date.timestamp() * 1000)
-    timeframe_seconds = 3600  # 1 hour
+    timeframe_seconds = 3600
     all_ohlcv = []
     max_retries = 5
     progress_bar = st.progress(0)
     while since < int(end_date.timestamp() * 1000):
         for attempt in range(max_retries):
             try:
-                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=500)  # Reduced limit to avoid rate limits
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=500)
                 if not ohlcv:
                     break
                 all_ohlcv.extend(ohlcv)
                 since = int(ohlcv[-1][0]) + timeframe_seconds * 1000
                 progress_bar.progress(min(1.0, since / (end_date.timestamp() * 1000)))
-                time.sleep(2)  # Increased delay to respect rate limits
+                time.sleep(3)  # Increased delay to avoid rate limits
                 break
             except Exception as e:
                 if attempt == max_retries - 1:
                     st.warning(f"Failed to fetch Kraken data after {max_retries} attempts: {e}")
                     break
-                time.sleep(2 ** (attempt + 1))  # Exponential backoff
+                time.sleep(2 ** (attempt + 2))  # Exponential backoff
     progress_bar.empty()
     if all_ohlcv:
         df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -131,7 +134,7 @@ def get_hit_prob(level_list, price_grid, u, metric, T, epsilon, geodesic_prices)
     total_level_prob = sum(probs) + 1e-10
     return [p / total_level_prob for p in probs] if total_level_prob > 0 else [0] * len(level_list)
 
-def create_interactive_density_chart(price_grid, density, s_levels, r_levels, epsilon):
+def create_interactive_density_chart(price_grid, density, s_levels, r_levels, epsilon, forward_price):
     if len(price_grid) == 0 or len(density) == 0:
         st.error("Density chart data is empty.")
         return None
@@ -146,8 +149,9 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
         fig.add_vrect(x0=level - epsilon, x1=level + epsilon, fillcolor="red", opacity=0.2,
                       layer="below", line_width=0)
         fig.add_vline(x=level, line_color='red', line_dash='dash')
+    fig.add_vline(x=forward_price, line_dash="dot", line_color="lightslategrey", annotation_text="Fwd (F)")
     fig.update_layout(
-        title="Options Implied Probability Distribution with S/R Zones",
+        title="SVI Implied Probability Distribution with S/R Zones",
         xaxis_title="Price (USD)",
         yaxis_title="Density",
         showlegend=False,
@@ -251,7 +255,7 @@ def get_thalex_options_data(coin: str, expiry_str: str, instruments: List[Dict])
                 })
             except (ValueError, IndexError):
                 continue
-        time.sleep(0.05)  # Increased delay for Thalex API
+        time.sleep(0.05)
         progress_bar.progress((i + 1) / len(instrument_names))
     progress_bar.empty()
     if not options_data:
@@ -330,6 +334,40 @@ class BlackScholes:
             put_price = self.K * np.exp(-self.r * self.T) * norm.cdf(-self.d2) - self.S * norm.cdf(-self.d1)
         return max(0, call_price), max(0, put_price)
 
+    def calculate_delta(self):
+        if self.sigma_sqrt_T < 1e-9:
+            call_delta = 1.0 if self.S > self.K else (0.0 if self.S < self.K else 0.5)
+            put_delta = -1.0 if self.S < self.K else (0.0 if self.S > self.K else -0.5)
+        else:
+            call_delta = norm.cdf(self.d1)
+            put_delta = norm.cdf(self.d1) - 1.0
+        return call_delta, put_delta
+
+    def calculate_gamma(self):
+        if self.sigma_sqrt_T < 1e-9 or self.S < 1e-9:
+            return 0.0
+        return norm.pdf(self.d1) / (self.S * self.sigma_sqrt_T)
+
+    def calculate_vega(self):
+        if self.sigma_sqrt_T < 1e-9:
+            return 0.0
+        return self.S * norm.pdf(self.d1) * np.sqrt(self.T) * 0.01
+
+    def calculate_vanna(self):
+        if self.sigma_sqrt_T < 1e-9 or self.sigma < 1e-9:
+            return 0.0
+        return -norm.pdf(self.d1) * self.d2 / self.sigma * 0.01
+
+    def calculate_theta(self):
+        if self.sigma_sqrt_T < 1e-9:
+            call_theta_val = -self.r * self.K * np.exp(-self.r * self.T) if self.S < self.K else 0.0
+            put_theta_val = -self.r * self.K * np.exp(-self.r * self.T) if self.S > self.K else 0.0
+            return call_theta_val / 365.25, put_theta_val / 365.25
+        term1_annual = -(self.S * norm.pdf(self.d1) * self.sigma) / (2 * np.sqrt(self.T))
+        call_theta_annual = term1_annual - self.r * self.K * np.exp(-self.r * self.T) * norm.cdf(self.d2)
+        put_theta_annual = term1_annual + self.r * self.K * np.exp(-self.r * self.T) * norm.cdf(-self.d2)
+        return call_theta_annual / 365.25, put_theta_annual / 365.25
+
 # --- SVI Functions ---
 def raw_svi_total_variance(k, params):
     a, b, rho, m, sigma = params['a'], params['b'], params['rho'], params['m'], params['sigma']
@@ -337,6 +375,12 @@ def raw_svi_total_variance(k, params):
     rho = np.clip(rho, -0.9999, 0.9999)
     sigma = max(1e-5, sigma)
     return a + b * (rho * (k - m) + np.sqrt((k - m)**2 + sigma**2))
+
+def check_raw_svi_params_validity(params):
+    a, b, rho, sigma = params['a'], params.get('b', 0), params.get('rho', 0), params.get('sigma', 1e-3)
+    if b < 0 or not (-1 < rho < 1) or sigma <= 0:
+        return False
+    return (a + b * sigma * np.sqrt(1 - rho**2)) >= -1e-9
 
 def check_svi_butterfly_arbitrage_gk(k_val, svi_params, T_expiry):
     w_func = lambda x_k_internal: raw_svi_total_variance(x_k_internal, svi_params)
@@ -350,7 +394,7 @@ def check_svi_butterfly_arbitrage_gk(k_val, svi_params, T_expiry):
         dw_dk = (w_k_plus_eps - w_k_minus_eps) / (2 * eps)
         d2w_dk2 = (w_k_plus_eps - 2 * w_k + w_k_minus_eps) / (eps**2)
     except:
-        logging.error(f"Error in SVI butterfly arbitrage check for k={k_val}")
+        logging.error(f"Error in numerical differentiation for g(k) (k={k_val})")
         return -1e9
     term1_denom = 2 * w_k
     if abs(term1_denom) < 1e-9:
@@ -366,12 +410,6 @@ def check_svi_butterfly_arbitrage_gk(k_val, svi_params, T_expiry):
     term3 = d2w_dk2 / 2.0
     g_k = term1 - term2 + term3
     return g_k
-
-def check_raw_svi_params_validity(params):
-    a, b, rho, sigma = params['a'], params.get('b', 0), params.get('rho', 0), params.get('sigma', 1e-3)
-    if b < 0 or not (-1 < rho < 1) or sigma <= 0:
-        return False
-    return (a + b * sigma * np.sqrt(1 - rho**2)) >= -1e-9
 
 def svi_objective_function(svi_params_array, market_ivs, market_ks, T, F, weights):
     params = {'a': svi_params_array[0], 'b': svi_params_array[1], 'rho': svi_params_array[2],
@@ -407,9 +445,11 @@ def calibrate_raw_svi(market_ivs, market_strikes, F, T, initial_params_dict=None
                      method='L-BFGS-B', bounds=bounds, options={'ftol': 1e-8, 'gtol': 1e-6, 'maxiter': 500})
     if result.success or result.status in [0, 1, 2]:
         cal_p = {'a': result.x[0], 'b': result.x[1], 'rho': result.x[2], 'm': result.x[3], 'sigma': result.x[4]}
-        logging.info(f"SVI Calibration Success: {result.message}, Error: {result.fun:.2e}, Params: {cal_p}")
+        if not check_raw_svi_params_validity(cal_p):
+            logging.warning(f"SVI Calib params invalid post-opt: {cal_p}")
+        logging.info(f"SVI Calib Success: {result.message}, Error: {result.fun:.2e}, Params: {cal_p}")
         return cal_p, result.fun
-    logging.error(f"SVI Calibration failed: {result.message}")
+    logging.error(f"SVI Calib failed: {result.message}")
     return None, np.inf
 
 def get_pdf_from_svi_prices(K_grid_dense, call_prices_svi, r_rate, T_expiry):
@@ -424,10 +464,32 @@ def get_pdf_from_svi_prices(K_grid_dense, call_prices_svi, r_rate, T_expiry):
     d2C_dK2[-1] = d2C_dK2[-2]
     pdf_values = np.exp(r_rate * T_expiry) * d2C_dK2
     pdf_values = np.maximum(pdf_values, 0)
-    integral_pdf = np.trapezoid(pdf_values, K_grid_dense)
+    integral_pdf = np.trapz(pdf_values, K_grid_dense)
     if integral_pdf > 1e-6:
         pdf_values /= integral_pdf
     return pd.DataFrame({'strike': K_grid_dense, 'pdf': pdf_values})
+
+def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
+    if prices.empty or len(prices) < period + 1:
+        return pd.Series(dtype='float64', index=prices.index)
+    delta = prices.diff()
+    gain = delta.clip(lower=0).rolling(window=period, min_periods=period).mean()
+    loss = -delta.clip(upper=0).rolling(window=period, min_periods=period).mean()
+    rs = gain / loss
+    rsi = np.select(
+        [loss == 0, gain == 0],
+        [np.select([gain == 0], [50], default=100), 0],
+        default=100 - (100 / (1 + rs))
+    )
+    return pd.Series(rsi, index=prices.index)
+
+def calculate_realized_volatility(price_series: pd.Series, window: int, trading_periods_per_year: int = 365):
+    if price_series.empty or len(price_series) < window + 1:
+        return pd.Series(dtype='float64'), np.nan
+    log_returns = np.log(price_series / price_series.shift(1))
+    rv_series = log_returns.rolling(window=window, min_periods=window).std() * np.sqrt(trading_periods_per_year)
+    current_rv = rv_series.iloc[-1] if not rv_series.empty and pd.notna(rv_series.iloc[-1]) else np.nan
+    return rv_series, current_rv
 
 # --- Main Application Logic ---
 st.sidebar.header("Model Parameters")
@@ -440,9 +502,16 @@ expiries = get_expiries_from_instruments(all_instruments, coin)
 sel_expiry = st.sidebar.selectbox("Options Expiry", expiries, index=0) if expiries else None
 r_rate = st.sidebar.slider("Interest Rate (%)", 0.0, 10.0, 1.6, 0.1) / 100.0
 use_oi_weights = st.sidebar.checkbox("Use OI Weights", value=True)
-reset_button = st.sidebar.button("Reset to Defaults")
-if reset_button:
-    days_history, epsilon_factor = 30, 0.5
+ivrv_n_days = st.sidebar.slider("N-day period for IV/RV analysis", 7, 180, 30, 1)
+run_btn = st.sidebar.button("Run Analysis", use_container_width=True, type="primary", disabled=not sel_expiry)
+
+if 'vol_regime_info' not in st.session_state:
+    st.session_state.vol_regime_info = {
+        "iv_rv_z_score": np.nan, "iv_rv_spread": np.nan, "current_atm_iv": np.nan,
+        "current_n_day_rv": np.nan, "dtm_days_for_iv": np.nan, "n_day_for_rv": 30,
+        "regime_category": "Normal", "rsi_14d": np.nan, "rsi_14h": np.nan,
+        "rsi_14d_regime": "N/A", "rsi_14h_regime": "N/A", "combined_momentum_regime": "N/A"
+    }
 
 end_date = pd.Timestamp.now(tz='UTC')
 start_date = end_date - pd.Timedelta(days=days_history)
@@ -453,9 +522,9 @@ if df is not None and len(df) > 10:
     prices = df['close'].values
     times_pd = df['datetime']
     times = (times_pd - times_pd.iloc[0]).dt.total_seconds() / (24 * 3600)  # Convert to days
-    T = times.iloc[-1] if not times.empty else 1.0  # Fallback to 1 day
+    T = times.iloc[-1] if not times.empty else 1.0
     N = len(prices)
-    p0 = prices[0] if len(prices) > 0 else 70000  # Fallback price
+    p0 = prices[0] if len(prices) > 0 else 70000
     returns = 100 * df['close'].pct_change().dropna()
     current_price = df['close'].iloc[-1] if not df['close'].empty else 70000
     if returns.empty:
@@ -491,8 +560,7 @@ if df is not None and len(df) > 10:
                 volatility_adjustment = np.interp(linear_times, times, sigma)
                 adjusted_prices = linear_prices * (1 + 0.1 * volatility_adjustment)
                 geodesic_df = pd.DataFrame({"Time": linear_times, "Price": adjusted_prices, "Path": "Geodesic"})
-    # --- Options Analysis ---
-    if sel_expiry:
+    if sel_expiry and run_btn:
         st.header("Options-Based S/R Analysis (SVI)")
         with st.spinner("Fetching options data..."):
             df_options = get_thalex_options_data(coin, sel_expiry, all_instruments)
@@ -504,11 +572,10 @@ if df is not None and len(df) > 10:
             perp_ticker = get_thalex_ticker(f"{coin}-PERPETUAL")
             spot_price = float(perp_ticker['mark_price']) if perp_ticker and perp_ticker.get('mark_price') else current_price
             forward_price = spot_price * np.exp(r_rate * ttm)
-            # Use ATM IV from options data as volatility for manifold
             atm_iv = df_options.iloc[(df_options['strike'] - forward_price).abs().argsort()[:1]]['iv'].iloc[0]
             if pd.isna(atm_iv) or atm_iv <= 0:
-                atm_iv = 0.5  # Fallback
-            sigma_options = np.full_like(times, atm_iv)  # Constant IV over TTM
+                atm_iv = 0.5
+            sigma_options = np.full_like(times, atm_iv)
             metric = VolatilityMetric(sigma_options, times, ttm)
             with col1:
                 if not geodesic_df.empty:
@@ -517,7 +584,6 @@ if df is not None and len(df) > 10:
                         y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False))
                     )
                     geodesic_line = base.mark_line(strokeWidth=3, color="red").encode(detail='Path:N')
-                    # S/R levels will be added after computing from SVI
             with st.spinner("Calibrating SVI model..."):
                 market_strikes = df_options['strike'].values
                 market_ivs = df_options['iv'].values
@@ -545,7 +611,20 @@ if df is not None and len(df) > 10:
                 svi_cols[2].metric("rho", f"{svi_params['rho']:.3f}")
                 svi_cols[3].metric("m", f"{svi_params['m']:.3f}")
                 svi_cols[4].metric("sigma", f"{svi_params['sigma']:.3f}")
-                # Generate PDF
+                # Butterfly Arbitrage Check
+                st.subheader("SVI Butterfly Arbitrage Check (g(k))")
+                st.caption("For no butterfly arbitrage, g(k) must be >= 0.")
+                min_k_check = np.log(max(1e-3, forward_price * 0.3) / forward_price)
+                max_k_check = np.log(forward_price * 2.0 / forward_price)
+                ks_to_check = np.linspace(min_k_check, max_k_check, 25)
+                g_values = [check_svi_butterfly_arbitrage_gk(k_val, svi_params, ttm) for k_val in ks_to_check]
+                df_g_check = pd.DataFrame({'Log-Moneyness (k)': ks_to_check, 'Strike (K)': forward_price * np.exp(ks_to_check), 'g(k)': g_values})
+                st.dataframe(df_g_check.style.format({'Log-Moneyness (k)': "{:.3f}", 'Strike (K)': "${:,.0f}", 'g(k)':"{:.4f}"}).applymap(lambda val: 'color: red' if isinstance(val, (float,int)) and val < -1e-5 else '', subset=['g(k)']))
+                if np.any(np.array(g_values) < -1e-5):
+                    st.warning("SVI fit may contain butterfly arbitrage.")
+                else:
+                    st.success("SVI fit appears free of significant butterfly arbitrage at checked points.")
+                # Generate PDF and S/R Levels
                 price_grid = np.linspace(max(1, forward_price * 0.3), forward_price * 2.0, 300)
                 log_moneyness = np.log(np.maximum(price_grid, 1e-6) / forward_price)
                 svi_total_var = raw_svi_total_variance(log_moneyness, svi_params)
@@ -553,7 +632,6 @@ if df is not None and len(df) > 10:
                 call_prices_svi = np.array([BlackScholes(ttm, K, forward_price, iv, r_rate).calculate_prices()[0]
                                            for K, iv in zip(price_grid, svi_ivs)])
                 pdf_df = get_pdf_from_svi_prices(price_grid, call_prices_svi, r_rate, ttm)
-                # Compute S/R levels
                 price_std = forward_price * np.mean(svi_ivs) * np.sqrt(ttm)
                 u = pdf_df['pdf'].values
                 peak_height = np.percentile(u, 75)
@@ -611,7 +689,7 @@ if df is not None and len(df) > 10:
                             - Larger values: broader zones.  
                             **Recommended: 0.3–0.7.**
                             """)
-                            interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon)
+                            interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon, forward_price)
                             if interactive_density_fig:
                                 try:
                                     st.plotly_chart(interactive_density_fig, use_container_width=True)
@@ -649,47 +727,202 @@ if df is not None and len(df) > 10:
                     except Exception as e:
                         st.error(f"Failed to render volume profile chart: {e}")
                 # Options Chain
-                st.subheader("Options Chain")
-                st.dataframe(df_options[['instrument', 'strike', 'type', 'mark_price', 'iv', 'delta']].style.format({
-                    'strike': '{:,.0f}',
-                    'mark_price': '${:.2f}',
-                    'iv': '{:.2%}',
-                    'delta': '{:.2f}'
-                }))
+                st.header("Options Chain")
+                df_options['model_iv'] = np.sqrt(np.maximum(raw_svi_total_variance(np.log(np.maximum(df_options['strike'], 1e-6)/forward_price), svi_params), 1e-9) / ttm)
+                df_options['model_price'] = df_options.apply(
+                    lambda r: BlackScholes(ttm, r['strike'], forward_price, r['model_iv'], r_rate).calculate_prices()[0 if r['type'] == 'C' else 1], axis=1)
+                df_options['iv_diff'] = df_options['iv'] - df_options['model_iv']
+                df_options['price_diff'] = df_options['mark_price'] - df_options['model_price']
+                df_options['price_diff_pct'] = (df_options['price_diff'] / df_options['mark_price'].replace(0, np.nan)) * 100
+                df_options['intrinsic_value'] = np.where(df_options['type'] == 'C',
+                                                        np.maximum(0.0, spot_price - df_options['strike']),
+                                                        np.maximum(0.0, df_options['strike'] - spot_price))
+                df_options['time_value'] = np.maximum(0.0, df_options['mark_price'] - df_options['intrinsic_value'])
+                df_options['cc_cost'] = np.where(df_options['type'] == 'C', spot_price - df_options['mark_price'], np.nan)
+                df_options['cc'] = (df_options['type'] == 'C') & (df_options['mark_price'] / spot_price > 0.01)
+                greeks_data = {'delta': [], 'gamma': [], 'vega': [], 'theta': [], 'vanna': [], 'theta_gamma_ratio': []}
+                for _, row in df_options.iterrows():
+                    bs = BlackScholes(ttm, row['strike'], spot_price, row['iv'], r_rate)
+                    dc, dp = bs.calculate_delta()
+                    greeks_data['delta'].append(dc if row['type'] == 'C' else dp)
+                    gamma_val = bs.calculate_gamma()
+                    greeks_data['gamma'].append(gamma_val)
+                    greeks_data['vega'].append(bs.calculate_vega())
+                    tc, tp = bs.calculate_theta()
+                    theta_val = tc if row['type'] == 'C' else tp
+                    greeks_data['theta'].append(theta_val)
+                    greeks_data['vanna'].append(bs.calculate_vanna())
+                    greeks_data['theta_gamma_ratio'].append(theta_val / (gamma_val + 1e-9))
+                for greek_name, values in greeks_data.items():
+                    df_options[greek_name] = values
+                cols_to_display = ['instrument', 'strike', 'type', 'mark_price', 'cc_cost', 'time_value', 'cc', 'iv', 'delta', 'gamma', 'theta_gamma_ratio', 'vega', 'theta', 'vanna', 'model_iv', 'iv_diff', 'model_price', 'price_diff', 'price_diff_pct', 'open_interest']
+                cols_existing = [c for c in cols_to_display if c in df_options.columns]
+                style_formats = {
+                    'strike': '{:,.0f}', 'mark_price': '${:,.4f}', 'cc_cost': '${:,.2f}', 'time_value': '${:,.4f}',
+                    'iv': '{:.2%}', 'delta': '{:.3f}', 'gamma': '{:.8f}', 'theta_gamma_ratio': '{:.2f}',
+                    'vega': '{:.2f}', 'theta': '{:.3f}', 'vanna': '{:.4f}', 'model_iv': '{:.2%}',
+                    'iv_diff': '{:.2%}', 'model_price': '${:,.4f}', 'price_diff': '${:,.4f}', 'price_diff_pct': '{:.1f}%',
+                    'open_interest': '{:,.1f}'
+                }
+                style_formats_applied = {k: v for k, v in style_formats.items() if k in cols_existing}
+                styled_df = df_options[cols_existing].style.format(style_formats_applied).background_gradient(
+                    subset=['iv_diff', 'price_diff_pct'], cmap='RdYlGn', vmin=-0.10, vmax=0.10, axis=0)
+                st.dataframe(styled_df, height=400, use_container_width=True)
+                # IV/RV Analysis
+                st.header("Implied vs. Realized Volatility & Momentum Analysis")
+                st.session_state.vol_regime_info['dtm_days_for_iv'] = ttm * 365.25
+                current_atm_iv = df_options.iloc[(df_options['strike'] - forward_price).abs().argsort()[:1]]['iv'].iloc[0]
+                if pd.isna(current_atm_iv) or current_atm_iv <= 0:
+                    current_atm_iv = np.nan
+                st.session_state.vol_regime_info['current_atm_iv'] = current_atm_iv
+                ohlcv_rv_df = fetch_kraken_data('BTC/USD', '1d', end_date - pd.Timedelta(days=ivrv_n_days + 60), end_date)
+                hist_rv_series, curr_n_day_rv = (pd.Series(dtype='float64'), np.nan)
+                if not ohlcv_rv_df.empty and 'close' in ohlcv_rv_df.columns and len(ohlcv_rv_df['close'].dropna()) >= ivrv_n_days + 1:
+                    hist_rv_series, curr_n_day_rv = calculate_realized_volatility(ohlcv_rv_df['close'], window=ivrv_n_days)
+                st.session_state.vol_regime_info['current_n_day_rv'] = curr_n_day_rv if pd.notna(curr_n_day_rv) else np.nan
+                st.session_state.vol_regime_info['n_day_for_rv'] = ivrv_n_days
+                m_hist_rv, s_hist_rv, rv_z_calc = np.nan, np.nan, np.nan
+                can_calc_rv_z = False
+                if not hist_rv_series.empty and len(hist_rv_series.dropna()) > 10:
+                    hrv_data = hist_rv_series.dropna()
+                    if len(hrv_data) > 10:
+                        m_hist_rv, s_hist_rv = hrv_data.mean(), hrv_data.std()
+                        if pd.notna(current_atm_iv) and pd.notna(m_hist_rv) and pd.notna(s_hist_rv) and s_hist_rv > 1e-6:
+                            rv_z_calc = (current_atm_iv - m_hist_rv) / s_hist_rv
+                            can_calc_rv_z = True
+                st.session_state.vol_regime_info['iv_rv_z_score'] = rv_z_calc if can_calc_rv_z else np.nan
+                ivrv_spr = current_atm_iv - curr_n_day_rv if pd.notna(current_atm_iv) and pd.notna(curr_n_day_rv) else np.nan
+                st.session_state.vol_regime_info['iv_rv_spread'] = ivrv_spr
+                if can_calc_rv_z and pd.notna(rv_z_calc):
+                    if rv_z_calc > Z_SCORE_HIGH_IV_THRESHOLD:
+                        st.session_state.vol_regime_info['regime_category'] = "High IV"
+                    elif rv_z_calc < Z_SCORE_LOW_IV_THRESHOLD:
+                        st.session_state.vol_regime_info['regime_category'] = "Low IV"
+                    else:
+                        st.session_state.vol_regime_info['regime_category'] = "Normal IV"
+                else:
+                    st.session_state.vol_regime_info['regime_category'] = "Unknown (RV Z-score N/A)"
+                iv_interpretation_text = [
+                    f"Current ATM IV for this {ttm*365.25:.0f}-day expiry is **{current_atm_iv:.2%}**." if pd.notna(current_atm_iv) else "Current ATM IV: N/A."
+                ]
+                if can_calc_rv_z:
+                    if rv_z_calc > 1.5:
+                        iv_interpretation_text.append(f" This is **significantly above** historical average {ivrv_n_days}-D RV ({m_hist_rv:.2%}).")
+                    elif rv_z_calc < -1.5:
+                        iv_interpretation_text.append(f" This is **significantly below** historical average {ivrv_n_days}-D RV ({m_hist_rv:.2%}).")
+                    else:
+                        iv_interpretation_text.append(f" This is **near** historical average {ivrv_n_days}-D RV ({m_hist_rv:.2%}).")
+                else:
+                    iv_interpretation_text.append(" Z-score vs historical RV not available.")
+                st.markdown(" ".join(iv_interpretation_text))
+                st.metric("Current Volatility Regime (IV vs RV)", st.session_state.vol_regime_info['regime_category'])
+                metric_cols = st.columns(4)
+                metric_cols[0].metric(f"ATM IV ({ttm*365.25:.0f}D)", f"{current_atm_iv:.2%}" if pd.notna(current_atm_iv) else "N/A")
+                metric_cols[1].metric(f"{ivrv_n_days}-D RV (Realized)", f"{curr_n_day_rv:.2%}" if pd.notna(curr_n_day_rv) else "N/A")
+                metric_cols[2].metric("IV - RV Spread", f"{ivrv_spr:.2%}" if pd.notna(ivrv_spr) else "N/A")
+                metric_cols[3].metric("IV vs Hist. RV Z-Score", f"{rv_z_calc:.2f}" if pd.notna(rv_z_calc) else "N/A")
+                # RSI Analysis
+                rsi_14d, rsi_14h = np.nan, np.nan
+                ohlcv_d_rsi = fetch_kraken_data('BTC/USD', '1d', end_date - pd.Timedelta(days=60), end_date)
+                if not ohlcv_d_rsi.empty and 'close' in ohlcv_d_rsi.columns and len(ohlcv_d_rsi['close'].dropna()) >= 15:
+                    rsi_14d_s = calculate_rsi(ohlcv_d_rsi['close'].dropna(), period=14)
+                    if not rsi_14d_s.empty and pd.notna(rsi_14d_s.iloc[-1]):
+                        rsi_14d = rsi_14d_s.iloc[-1]
+                ohlcv_h_rsi = fetch_kraken_data('BTC/USD', '1h', end_date - pd.Timedelta(days=14), end_date)
+                if not ohlcv_h_rsi.empty and 'close' in ohlcv_h_rsi.columns and len(ohlcv_h_rsi['close'].dropna()) >= 15:
+                    rsi_14h_s = calculate_rsi(ohlcv_h_rsi['close'].dropna(), period=14)
+                    if not rsi_14h_s.empty and pd.notna(rsi_14h_s.iloc[-1]):
+                        rsi_14h = rsi_14h_s.iloc[-1]
+                def interpret_rsi_val(rsi_value, period_label):
+                    if pd.isna(rsi_value):
+                        return f"{period_label} RSI: N/A (Insufficient data)", "N/A"
+                    if rsi_value >= RSI_BULLISH_THRESHOLD:
+                        return f"{period_label} RSI: {rsi_value:.2f} (Bullish - Overbought or strong upward momentum)", "Bullish"
+                    elif rsi_value <= RSI_BEARISH_THRESHOLD:
+                        return f"{period_label} RSI: {rsi_value:.2f} (Bearish - Oversold or strong downward momentum)", "Bearish"
+                    return f"{period_label} RSI: {rsi_value:.2f} (Neutral - No strong directional momentum)", "Neutral"
+                rsi_14d_text, rsi_14d_cat = interpret_rsi_val(rsi_14d, "Daily (14D)")
+                rsi_14h_text, rsi_14h_cat = interpret_rsi_val(rsi_14h, "Hourly (14H)")
+                combined_momentum = "Strong Bullish Alignment" if rsi_14d_cat == "Bullish" and rsi_14h_cat == "Bullish" else \
+                                    "Strong Bearish Alignment" if rsi_14d_cat == "Bearish" and rsi_14h_cat == "Bearish" else \
+                                    "Neutral/Mixed Momentum"
+                st.session_state.vol_regime_info.update({
+                    'rsi_14d': rsi_14d, 'rsi_14h': rsi_14h, 'rsi_14d_regime': rsi_14d_text,
+                    'rsi_14h_regime': rsi_14h_text, 'combined_momentum_regime': combined_momentum
+                })
+                rsi_cols = st.columns(3)
+                rsi_cols[0].metric("RSI-14 Day", f"{rsi_14d:.2f}" if pd.notna(rsi_14d) else "N/A", help=rsi_14d_text.split('(')[0].strip())
+                rsi_cols[1].metric("RSI-14 Hour", f"{rsi_14h:.2f}" if pd.notna(rsi_14h) else "N/A", help=rsi_14h_text.split('(')[0].strip())
+                rsi_cols[2].metric("Combined Momentum", combined_momentum)
+                st.caption(f"RSI Regimes: Bullish ≥ {RSI_BULLISH_THRESHOLD}, Bearish ≤ {RSI_BEARISH_THRESHOLD}, Neutral otherwise.")
+                # IV Smile Plot
+                st.header("Market & SVI Volatility Smile")
+                one_std_dev_price_move = forward_price * atm_iv * np.sqrt(ttm)
+                min_strike_2sd = forward_price - 2 * one_std_dev_price_move
+                max_strike_2sd = forward_price + 2 * one_std_dev_price_move
+                plot_min_strike = max(0.1, min_strike_2sd * 0.95)
+                plot_max_strike = max_strike_2sd * 1.05
+                st.info(f"Plotting smile data within ~2 Standard Deviations of Forward ({plot_min_strike:.0f} - {plot_max_strike:.0f}).")
+                col_disp1, col_disp2, col_disp3, col_disp4 = st.columns(4)
+                col_disp1.metric("Spot (S)", f"${spot_price:,.2f}")
+                col_disp2.metric("Forward (F)", f"${forward_price:,.2f}")
+                col_disp3.metric("DTE", f"{ttm*365.25:.2f}")
+                col_disp4.metric(f"Market ATM IV (K≈F)", f"{atm_iv:.2%}" if pd.notna(atm_iv) else "N/A")
+                df_filtered = df_options[(df_options['strike'] >= plot_min_strike) & (df_options['strike'] <= plot_max_strike)]
+                fig_sml = go.Figure()
+                calls_filtered = df_filtered[df_filtered['type'] == 'C']
+                puts_filtered = df_filtered[df_filtered['type'] == 'P']
+                if not calls_filtered.empty:
+                    fig_sml.add_trace(go.Scatter(x=calls_filtered['strike'], y=calls_filtered['iv'], mode='markers+lines', name='Calls IV (Market)', marker=dict(color='deepskyblue', size=7)))
+                if not puts_filtered.empty:
+                    fig_sml.add_trace(go.Scatter(x=puts_filtered['strike'], y=puts_filtered['iv'], mode='markers+lines', name='Puts IV (Market)', marker=dict(color='salmon', size=7, symbol='x')))
+                fig_sml.add_vline(x=spot_price, line_dash="dash", line_color="grey", annotation_text="Spot (S)")
+                fig_sml.add_vline(x=forward_price, line_dash="dot", line_color="lightslategrey", annotation_text="Fwd (F)")
+                fineK_grid = np.linspace(max(1e-3, plot_min_strike * 0.9), plot_max_strike * 1.1, 200)
+                fine_log_moneyness = np.log(np.maximum(fineK_grid, 1e-6) / forward_price)
+                svi_ivs_fine = np.sqrt(np.maximum(raw_svi_total_variance(fine_log_moneyness, svi_params), 1e-9) / ttm)
+                fig_sml.add_trace(go.Scatter(x=fineK_grid, y=svi_ivs_fine, mode='lines', name='SVI Fit', line=dict(color='lightgreen', width=2, dash='dashdot')))
+                fig_sml.update_layout(
+                    title=f"Market and SVI IV Smile: {coin}-{sel_expiry}",
+                    xaxis_title="Strike ($)",
+                    yaxis_title="Implied Volatility",
+                    yaxis_tickformat=".1%",
+                    template="plotly_dark",
+                    xaxis_range=[plot_min_strike, plot_max_strike]
+                )
+                st.plotly_chart(fig_sml, use_container_width=True)
             else:
                 st.error("SVI calibration failed.")
+            # Export Results
+            st.header("Export Results")
+            export_button = st.button("Download Charts and Data")
+            if export_button:
+                with st.spinner("Generating exports..."):
+                    try:
+                        chart.save("price_chart.html")
+                        with open("price_chart.html", "rb") as f:
+                            st.download_button("Download Price Chart", f, file_name="price_chart.html")
+                    except Exception as e:
+                        st.warning(f"Failed to export price chart: {e}")
+                    if interactive_density_fig:
+                        interactive_density_fig.write_html("density_chart.html")
+                        with open("density_chart.html", "rb") as f:
+                            st.download_button("Download Density Chart", f, file_name="density_chart.html")
+                    if volume_profile_fig:
+                        volume_profile_fig.write_html("volume_profile.html")
+                        with open("volume_profile.html", "rb") as f:
+                            st.download_button("Download Volume Profile", f, file_name="volume_profile.html")
+                    sr_data = pd.concat([
+                        pd.DataFrame({'Type': 'Support', 'Level': support_levels, 'Hit %': support_probs}),
+                        pd.DataFrame({'Type': 'Resistance', 'Level': resistance_levels, 'Hit %': resistance_probs})
+                    ])
+                    st.download_button("Download S/R Data", sr_data.to_csv(index=False), file_name="sr_levels.csv")
+                    if df_options is not None and not df_options.empty:
+                        st.download_button("Download Options Data", df_options.to_csv(index=False), file_name="options_data.csv")
         else:
             st.error("No valid options data available.")
     else:
-        st.info("Select an options expiry to enable S/R analysis.")
-
-    # --- Export Results ---
-    st.header("Export Results")
-    export_button = st.button("Download Charts and Data")
-    if export_button:
-        with st.spinner("Generating exports..."):
-            try:
-                chart.save("price_chart.html")
-                with open("price_chart.html", "rb") as f:
-                    st.download_button("Download Price Chart", f, file_name="price_chart.html")
-            except Exception as e:
-                st.warning(f"Failed to export price chart: {e}")
-            if interactive_density_fig:
-                interactive_density_fig.write_html("density_chart.html")
-                with open("density_chart.html", "rb") as f:
-                    st.download_button("Download Density Chart", f, file_name="density_chart.html")
-            if volume_profile_fig:
-                volume_profile_fig.write_html("volume_profile.html")
-                with open("volume_profile.html", "rb") as f:
-                    st.download_button("Download Volume Profile", f, file_name="volume_profile.html")
-            sr_data = pd.concat([
-                pd.DataFrame({'Type': 'Support', 'Level': support_levels, 'Hit %': support_probs}),
-                pd.DataFrame({'Type': 'Resistance', 'Level': resistance_levels, 'Hit %': resistance_probs})
-            ])
-            st.download_button("Download S/R Data", sr_data.to_csv(index=False), file_name="sr_levels.csv")
-            if df_options is not None and not df_options.empty:
-                st.download_button("Download Options Data", df_options.to_csv(index=False), file_name="options_data.csv")
-
+        st.info("Select an options expiry and click 'Run Analysis' to enable S/R analysis.")
 else:
     st.error("Could not load or process spot data. Check parameters or try again.")
 
