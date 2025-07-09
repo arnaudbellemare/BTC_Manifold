@@ -176,7 +176,7 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
     )
     return fig
 
-def create_volume_profile_chart(df, s_levels, r_levels, epsilon, n_bins=100):
+def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, n_bins=100):
     if df.empty or 'close' not in df or 'volume' not in df:
         st.error("Volume profile data is invalid or empty. Cannot render plot.")
         return None, None
@@ -202,7 +202,6 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, n_bins=100):
     fig.add_shape(type="line", y0=poc['price_bin'], y1=poc['price_bin'], x0=0, x1=poc['volume'], 
                   line=dict(color="orange", width=2, dash="dash"))
     # Add current price line in light blue
-    current_price = df['close'].iloc[-1] if not df['close'].empty else None
     if current_price and not np.isnan(current_price):
         fig.add_hline(y=current_price, line_color='lightblue', line_width=2, line_dash='solid',
                       annotation_text="Current Price", annotation_position="top right")
@@ -259,6 +258,8 @@ if df is not None and len(df) > 10:
     N = len(prices)
     p0 = prices[0]
     returns = 100 * df['close'].pct_change().dropna()
+    # Get current price
+    current_price = df['close'].iloc[-1] if not df['close'].empty else None
     
     if returns.empty:
         st.error("No valid returns data. Cannot proceed with analysis.")
@@ -429,7 +430,7 @@ if df is not None and len(df) > 10:
         Orange dashed line: POC. Light blue solid line: Current price.  
         Overlapping levels indicate high-conviction zones.
         """)
-        volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon)
+        volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon, current_price)
         if volume_profile_fig and poc is not None:
             try:
                 st.plotly_chart(volume_profile_fig, use_container_width=True)
