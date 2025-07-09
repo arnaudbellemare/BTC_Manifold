@@ -125,6 +125,45 @@ def simulate_paths(p0, mu, sigma, T, N, n_paths):
     paths = Parallel(n_jobs=-1)(delayed(simulate_single_path)(p0, mu, sigma, T, N, dt, i) for i in range(n_paths))
     return np.array(paths), t
 
+def weighted_quantile(data, quantiles, weights):
+    """Compute weighted quantiles for a 1D array."""
+    if len(data) != len(weights) or len(data) == 0:
+        raise ValueError("Data and weights must have the same length and be non-empty")
+    
+    # Normalize weights
+    weights = np.array(weights)
+    weights = weights / (np.sum(weights) + 1e-10)  # Avoid division by zero
+    
+    # Sort data and weights
+    sorted_indices = np.argsort(data)
+    sorted_data = data[sorted_indices]
+    sorted_weights = weights[sorted_indices]
+    
+    # Cumulative sum of weights
+    cumsum = np.cumsum(sorted_weights)
+    
+    # Compute quantiles
+    result = []
+    for q in quantiles:
+        # Find index where cumulative weight exceeds quantile
+        idx = np.searchsorted(cumsum, q, side='right')
+        if idx == 0:
+            result.append(sorted_data[0])
+        elif idx == len(data):
+            result.append(sorted_data[-1])
+        else:
+            # Linear interpolation between adjacent points
+            w_lower = cumsum[idx - 1]
+            w_upper = cumsum[idx]
+            if w_upper == w_lower:
+                result.append(sorted_data[idx])
+            else:
+                frac = (q - w_lower) / (w_upper - w_lower)
+                value = sorted_data[idx - 1] + frac * (sorted_data[idx] - sorted_data[idx - 1])
+                result.append(value)
+    
+    return np.array(result)
+
 def get_hit_prob(level_list, price_grid, u, metric, T, epsilon, geodesic_prices):
     probs = []
     total_prob = np.trapz(u, price_grid)  # Total probability for normalization
@@ -300,7 +339,8 @@ if df is not None and len(df) > 10:
             if len(cluster_centers) < 4:
                 warning_message += " Insufficient clusters. Supplementing with volatility-weighted quantiles."
                 weights = 1 / (sigma + 1e-6)
-                weighted_quantiles = np.quantile(final_prices, [0.15, 0.35, 0.65, 0.85], weights=weights/np.sum(weights))
+                # Use custom weighted quantile function
+                weighted_quantiles = weighted_quantile(final_prices, [0.15, 0.35, 0.65, 0.85], weights)
                 cluster_centers.extend(weighted_quantiles)
                 cluster_centers = np.unique(cluster_centers)[:6]
             
