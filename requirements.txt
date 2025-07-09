@@ -13,3 +13,7 @@ plotly
 numba
 joblib 
 scikit-learn
+requests
+statsmodels
+seaborn
+
