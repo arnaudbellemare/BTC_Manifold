@@ -28,7 +28,7 @@ st.set_page_config(layout="wide", page_icon="📊", page_title="BTC Options and 
 st.title("BTC/USD Options and Volatility-Weighted Manifold Analysis")
 st.markdown("""
 This application combines options-based probability analysis with a volatility-weighted manifold model for BTC/USD.  
-- **Options Analysis**: Implied volatility (IV) smiles and probability density functions (PDFs) using SVI model, ensuring no butterfly arbitrage.  
+- **Options Analysis**: Implied volatility (IV) smiles and probability density functions (PDFs) using SVI model, ensuring no butterfly arbitrage. The PDF is used to calculate a central probability range (e.g., 68% confidence interval).
 - **Manifold Analysis**: Models price-time space as a 2D manifold warped by options-implied volatility, with geodesic path (red) and S/R levels (green/red) on the PDF.  
 - **IV/RV & Momentum**: Compares implied vs. realized volatility and includes RSI-based momentum signals.  
 - **Volume Profile**: Historical trading activity with S/R levels and POC.  
@@ -134,11 +134,22 @@ def get_hit_prob(level_list, price_grid, u, metric, T, epsilon, geodesic_prices)
     total_level_prob = sum(probs) + 1e-10
     return [p / total_level_prob for p in probs] if total_level_prob > 0 else [0] * len(level_list)
 
-def create_interactive_density_chart(price_grid, density, s_levels, r_levels, epsilon, forward_price):
+def create_interactive_density_chart(price_grid, density, s_levels, r_levels, epsilon, forward_price, prob_range=None, confidence_level=None):
     if len(price_grid) == 0 or len(density) == 0:
         st.error("Density chart data is empty.")
         return None
     fig = go.Figure()
+
+    # Add the probability range rectangle first, so it's in the background
+    if prob_range and all(pd.notna(prob_range)) and confidence_level is not None:
+        lower, upper = prob_range
+        fig.add_vrect(x0=lower, x1=upper,
+                      fillcolor="rgba(255, 255, 0, 0.2)", # A light yellow
+                      layer="below", line_width=0,
+                      annotation_text=f"{confidence_level:.0%} Prob. Range",
+                      annotation_position="top left",
+                      annotation_font_size=12)
+
     fig.add_trace(go.Scatter(x=price_grid, y=density, mode='lines', name='Probability Density',
                             fill='tozeroy', line_color='lightblue', hovertemplate='Price: $%{x:,.2f}<br>Density: %{y:.4f}'))
     for level in s_levels:
@@ -204,6 +215,37 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, 
         height=400
     )
     return fig, poc
+
+def calculate_probability_range(price_grid, pdf_values, confidence_level):
+    """
+    Calculates the price range for a given confidence level from a PDF.
+    Args:
+        price_grid (np.ndarray): The grid of prices.
+        pdf_values (np.ndarray): The probability density at each price.
+        confidence_level (float): The desired confidence level (e.g., 0.68 for 68%).
+    Returns:
+        tuple: A tuple containing (lower_bound, upper_bound) of the price range.
+               Returns (np.nan, np.nan) if calculation is not possible.
+    """
+    if len(price_grid) != len(pdf_values) or len(price_grid) < 2:
+        return np.nan, np.nan
+    integral = np.trapz(pdf_values, price_grid)
+    if integral < 1e-6:
+        return np.nan, np.nan
+    normalized_pdf = pdf_values / integral
+    cdf_values = [np.trapz(normalized_pdf[:i+1], price_grid[:i+1]) for i in range(len(price_grid))]
+    cdf_values = np.array(cdf_values)
+    cdf_values[0], cdf_values[-1] = 0.0, 1.0
+    unique_cdf, unique_indices = np.unique(cdf_values, return_index=True)
+    unique_prices = price_grid[unique_indices]
+    if len(unique_cdf) < 2:
+         return np.nan, np.nan
+    inverse_cdf = interp1d(unique_cdf, unique_prices, bounds_error=False, fill_value="extrapolate")
+    tail_prob = (1.0 - confidence_level) / 2.0
+    lower_quantile, upper_quantile = tail_prob, 1.0 - tail_prob
+    lower_bound = float(inverse_cdf(lower_quantile))
+    upper_bound = float(inverse_cdf(upper_quantile))
+    return lower_bound, upper_bound
 
 # --- Thalex Options Helper Functions ---
 @st.cache_data(ttl=300)
@@ -493,7 +535,7 @@ def calculate_realized_volatility(price_series: pd.Series, window: int, trading_
 # --- Sidebar Configuration ---# --- Sidebar Configuration ---
 st.sidebar.header("Model Parameters")
 days_history = st.sidebar.slider("Historical Data (Days)", 7, 90, 30)
-epsilon_factor = st.sidebar.slider("Probability Range Factor", 0.1, 2.0, 0.5, step=0.05)
+epsilon_factor = st.sidebar.slider("S/R Zone Width Factor", 0.1, 2.0, 0.5, step=0.05, help="Controls the visual width of the Support/Resistance zones on the probability chart. Multiplied by price standard deviation.")
 st.session_state['profitability_threshold'] = st.sidebar.slider("Profitability Confidence Interval (%)", 68, 99, 68, step=1) / 100.0
 st.sidebar.header("Options Analysis Parameters")
 all_instruments = get_thalex_instruments()
@@ -624,8 +666,27 @@ if df is not None and len(df) > 10:
                 call_prices_svi = np.array([BlackScholes(ttm, K, forward_price, iv, r_rate).calculate_prices()[0]
                                            for K, iv in zip(price_grid, svi_ivs)])
                 pdf_df = get_pdf_from_svi_prices(price_grid, call_prices_svi, r_rate, ttm)
-                price_std = forward_price * np.mean(svi_ivs) * np.sqrt(ttm)
                 u = pdf_df['pdf'].values
+                # --- New Probability Range Calculation & Display ---
+                with col2:
+                    st.subheader("Options-Implied Probability Range")
+                    confidence_level = st.session_state.get('profitability_threshold', 0.68)
+                    lower_prob_range, upper_prob_range = calculate_probability_range(price_grid, u, confidence_level)
+
+                    if pd.notna(lower_prob_range) and pd.notna(upper_prob_range):
+                        range_cols = st.columns(2)
+                        range_cols[0].metric(
+                            label=f"Lower Bound ({((1-confidence_level)/2)*100:.1f}th percentile)",
+                            value=f"${lower_prob_range:,.2f}"
+                        )
+                        range_cols[1].metric(
+                            label=f"Upper Bound ({(1-((1-confidence_level)/2))*100:.1f}th percentile)",
+                            value=f"${upper_prob_range:,.2f}"
+                        )
+                    else:
+                        st.warning("Could not calculate the probability range for the selected confidence level.")
+                # --- End of New Section ---
+                price_std = forward_price * np.mean(svi_ivs) * np.sqrt(ttm)
                 peak_height = np.percentile(u, 75)
                 peak_distance = max(10, len(price_grid) // 50)
                 peaks, _ = find_peaks(u, height=peak_height, distance=peak_distance)
@@ -704,14 +765,16 @@ if df is not None and len(df) > 10:
                             else:
                                 st.dataframe(resistance_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
 
-                        with st.expander("Tune Probability Range Factor", expanded=True):
+                        with st.expander("Probability Distribution with S/R Zones", expanded=True):
                             st.markdown("""
-                            Adjust the 'Probability Range Factor' to control S/R zone width.  
-                            - Smaller values: tighter zones.  
-                            - Larger values: broader zones.  
-                            **Recommended: 0.3–0.7.**
+                            Adjust the 'S/R Zone Width Factor' in the sidebar to control the visual width of S/R zones.  
+                            The yellow shaded area shows the probability range based on the 'Profitability Confidence Interval' slider.
                             """)
-                            interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon, forward_price)
+                            interactive_density_fig = create_interactive_density_chart(
+                                price_grid, u, support_levels, resistance_levels, epsilon, forward_price,
+                                prob_range=(lower_prob_range, upper_prob_range),
+                                confidence_level=confidence_level
+                            )
                             if interactive_density_fig:
                                 try:
                                     st.plotly_chart(interactive_density_fig, use_container_width=True)
@@ -935,11 +998,11 @@ if df is not None and len(df) > 10:
                             st.download_button("Download Price Chart", f, file_name="price_chart.html")
                     except Exception as e:
                         st.warning(f"Failed to export price chart: {e}")
-                    if interactive_density_fig:
+                    if 'interactive_density_fig' in locals() and interactive_density_fig:
                         interactive_density_fig.write_html("density_chart.html")
                         with open("density_chart.html", "rb") as f:
                             st.download_button("Download Density Chart", f, file_name="density_chart.html")
-                    if volume_profile_fig:
+                    if 'volume_profile_fig' in locals() and volume_profile_fig:
                         volume_profile_fig.write_html("volume_profile.html")
                         with open("volume_profile.html", "rb") as f:
                             st.download_button("Download Volume Profile", f, file_name="volume_profile.html")
