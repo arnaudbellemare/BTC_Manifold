@@ -560,23 +560,21 @@ if df is not None and len(df) > 10:
             sigma_options = np.full_like(times, atm_iv)
             metric = VolatilityMetric(sigma_options, times, ttm)
             # Compute geodesic path
-            with col1:
-                st.subheader("Price Path and Geodesic")
-                with st.spinner("Computing geodesic path..."):
-                    delta_p = prices[-1] - p0 if len(prices) > 1 else 0
-                    recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
-                    y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
-                    t_eval = np.linspace(0, T, min(N, 100))
-                    try:
-                        sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), t_eval=t_eval, rtol=1e-5, method='Radau')
-                        geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
-                    except:
-                        st.warning("Geodesic computation failed. Using linear path.")
-                        linear_times = np.linspace(0, T, min(N, 100))
-                        linear_prices = np.linspace(p0, current_price, min(N, 100))
-                        volatility_adjustment = np.interp(linear_times, times, sigma)
-                        adjusted_prices = linear_prices * (1 + 0.1 * volatility_adjustment)
-                        geodesic_df = pd.DataFrame({"Time": linear_times, "Price": adjusted_prices, "Path": "Geodesic"})
+            with st.spinner("Computing geodesic path..."):
+                delta_p = prices[-1] - p0 if len(prices) > 1 else 0
+                recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
+                y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
+                t_eval = np.linspace(0, T, min(N, 100))
+                try:
+                    sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), t_eval=t_eval, rtol=1e-5, method='Radau')
+                    geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
+                except:
+                    st.warning("Geodesic computation failed. Using linear path.")
+                    linear_times = np.linspace(0, T, min(N, 100))
+                    linear_prices = np.linspace(p0, current_price, min(N, 100))
+                    volatility_adjustment = np.interp(linear_times, times, sigma)
+                    adjusted_prices = linear_prices * (1 + 0.1 * volatility_adjustment)
+                    geodesic_df = pd.DataFrame({"Time": linear_times, "Price": adjusted_prices, "Path": "Geodesic"})
             with st.spinner("Calibrating SVI model..."):
                 market_strikes = df_options['strike'].values
                 market_ivs = df_options['iv'].values
@@ -625,20 +623,8 @@ if df is not None and len(df) > 10:
                 call_prices_svi = np.array([BlackScholes(ttm, K, forward_price, iv, r_rate).calculate_prices()[0]
                                            for K, iv in zip(price_grid, svi_ivs)])
                 pdf_df = get_pdf_from_svi_prices(price_grid, call_prices_svi, r_rate, ttm)
-                price_std = forward_price * np.mean(svi_ivs) * np.sqrt(ttm)
                 u = pdf_df['pdf'].values
-                # Compute 68% confidence interval for profitability zones
-                cumulative_prob = np.cumsum(u) * (price_grid[1] - price_grid[0])
-                target_prob = 0.68
-                lower_idx = np.where(cumulative_prob >= (1 - target_prob) / 2)[0][0]
-                upper_idx = np.where(cumulative_prob >= (1 + target_prob) / 2)[0][0]
-                profit_lower = price_grid[lower_idx]
-                profit_upper = price_grid[upper_idx]
-                profit_zone_df = pd.DataFrame({
-                    'Time': [0, T, T, 0],
-                    'Price': [profit_lower, profit_lower, profit_upper, profit_upper],
-                    'Zone': 'Profitability (68% CI)'
-                })
+                price_std = forward_price * np.mean(svi_ivs) * np.sqrt(ttm)
                 peak_height = np.percentile(u, 75)
                 peak_distance = max(10, len(price_grid) // 50)
                 peaks, _ = find_peaks(u, height=peak_height, distance=peak_distance)
@@ -663,6 +649,7 @@ if df is not None and len(df) > 10:
                 resistance_levels = levels[levels > median_of_peaks][-2:]
                 # Plot Price Path with S/R and Profitability Zones
                 with col1:
+                    st.subheader("Price Path and Geodesic")
                     if not geodesic_df.empty:
                         # Prepare historical price data for plotting
                         price_df = pd.DataFrame({
@@ -684,7 +671,19 @@ if df is not None and len(df) > 10:
                         resistance_df = pd.DataFrame({"Price": resistance_levels})
                         support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
                         resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
-                        # Add profitability zone as shaded area
+                        # Compute 68% profitability zone from SVI PDF
+                        cumulative_prob = np.cumsum(u) * (price_grid[1] - price_grid[0])
+                        target_prob = 0.68
+                        lower_idx = np.where(cumulative_prob >= (1 - target_prob) / 2)[0][0]
+                        upper_idx = np.where(cumulative_prob >= (1 + target_prob) / 2)[0][0]
+                        profit_lower = price_grid[lower_idx]
+                        profit_upper = price_grid[upper_idx]
+                        profit_zone_df = pd.DataFrame({
+                            'Time': [0, T, T, 0],
+                            'Price': [profit_lower, profit_lower, profit_upper, profit_upper],
+                            'Zone': 'Profitability (68% CI)'
+                        })
+                        # Add profitability zone as shaded background
                         profit_zone = alt.Chart(profit_zone_df).mark_area(opacity=0.2, color="purple").encode(
                             x=alt.X("Time:Q"),
                             y=alt.Y("Price:Q"),
@@ -925,6 +924,22 @@ if df is not None and len(df) > 10:
                 st.error("SVI calibration failed.")
                 # Still display price path without S/R or profitability zones
                 with col1:
+                    st.subheader("Price Path and Geodesic")
+                    with st.spinner("Computing geodesic path..."):
+                        delta_p = prices[-1] - p0 if len(prices) > 1 else 0
+                        recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
+                        y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
+                        t_eval = np.linspace(0, T, min(N, 100))
+                        try:
+                            sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), t_eval=t_eval, rtol=1e-5, method='Radau')
+                            geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
+                        except:
+                            st.warning("Geodesic computation failed. Using linear path.")
+                            linear_times = np.linspace(0, T, min(N, 100))
+                            linear_prices = np.linspace(p0, current_price, min(N, 100))
+                            volatility_adjustment = np.interp(linear_times, times, sigma)
+                            adjusted_prices = linear_prices * (1 + 0.1 * volatility_adjustment)
+                            geodesic_df = pd.DataFrame({"Time": linear_times, "Price": adjusted_prices, "Path": "Geodesic"})
                     if not geodesic_df.empty:
                         price_df = pd.DataFrame({
                             "Time": times,
@@ -982,7 +997,6 @@ if df is not None and len(df) > 10:
                     recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
                     y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
                     t_eval = np.linspace(0, T, min(N, 100))
-                    metric = VolatilityMetric(sigma, times, T)
                     try:
                         sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), t_eval=t_eval, rtol=1e-5, method='Radau')
                         geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
