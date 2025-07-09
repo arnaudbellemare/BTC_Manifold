@@ -490,8 +490,7 @@ def calculate_realized_volatility(price_series: pd.Series, window: int, trading_
     rv_series = log_returns.rolling(window=window, min_periods=window).std() * np.sqrt(trading_periods_per_year)
     current_rv = rv_series.iloc[-1] if not rv_series.empty and pd.notna(rv_series.iloc[-1]) else np.nan
     return rv_series, current_rv
-# --- Sidebar Configuration ---
-# --- Sidebar Configuration ---
+# --- Sidebar Configuration ---# --- Sidebar Configuration ---
 st.sidebar.header("Model Parameters")
 days_history = st.sidebar.slider("Historical Data (Days)", 7, 90, 30)
 epsilon_factor = st.sidebar.slider("Probability Range Factor", 0.1, 2.0, 0.5, step=0.05)
@@ -504,7 +503,8 @@ sel_expiry = st.sidebar.selectbox("Options Expiry", expiries, index=0) if expiri
 r_rate = st.sidebar.slider("Interest Rate (%)", 0.0, 10.0, 1.6, 0.1) / 100.0
 use_oi_weights = st.sidebar.checkbox("Use OI Weights", value=True)
 ivrv_n_days = st.sidebar.slider("N-day period for IV/RV analysis", 7, 180, 30, 1)
-run_btn = st.sidebar.button("Run Analysis", use_container_width=True, type="primary", disabled=not sel_expiry)if 'vol_regime_info' not in st.session_state:
+run_btn = st.sidebar.button("Run Analysis", use_container_width=True, type="primary", disabled=not sel_expiry)
+
     st.session_state.vol_regime_info = {
         "iv_rv_z_score": np.nan, "iv_rv_spread": np.nan, "current_atm_iv": np.nan,
         "current_n_day_rv": np.nan, "dtm_days_for_iv": np.nan, "n_day_for_rv": 30,
