@@ -671,9 +671,9 @@ if df is not None and len(df) > 10:
                         resistance_df = pd.DataFrame({"Price": resistance_levels})
                         support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
                         resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
-                        # Compute 68% profitability zone from SVI PDF
+                        # Compute profitability zone from SVI PDF using sidebar value
                         cumulative_prob = np.cumsum(u) * (price_grid[1] - price_grid[0])
-                        target_prob = 0.68
+                        target_prob = st.session_state.get('profitability_threshold', 0.68)  # Default to 68% if not set
                         lower_idx = np.where(cumulative_prob >= (1 - target_prob) / 2)[0][0]
                         upper_idx = np.where(cumulative_prob >= (1 + target_prob) / 2)[0][0]
                         profit_lower = price_grid[lower_idx]
@@ -681,7 +681,7 @@ if df is not None and len(df) > 10:
                         profit_zone_df = pd.DataFrame({
                             'Time': [0, T, T, 0],
                             'Price': [profit_lower, profit_lower, profit_upper, profit_upper],
-                            'Zone': 'Profitability (68% CI)'
+                            'Zone': f'Profitability ({target_prob*100:.0f}% CI)'
                         })
                         # Add profitability zone as shaded background
                         profit_zone = alt.Chart(profit_zone_df).mark_area(opacity=0.2, color="purple").encode(
@@ -690,7 +690,7 @@ if df is not None and len(df) > 10:
                             detail="Zone:N"
                         )
                         chart = (profit_zone + price_line + support_lines + resistance_lines).properties(
-                            title="Price Path, Geodesic, S/R, and 68% Profitability Zone", height=500
+                            title=f"Price Path, Geodesic, S/R, and {target_prob*100:.0f}% Profitability Zone", height=500
                         ).interactive()
                         try:
                             st.altair_chart(chart, use_container_width=True)
@@ -728,7 +728,7 @@ if df is not None and len(df) > 10:
                             - Smaller values: tighter zones.  
                             - Larger values: broader zones.  
                             **Recommended: 0.3–0.7.**
-                            The purple shaded area shows the 68% confidence interval for profitability.
+                            The purple shaded area shows the selected profitability confidence interval.
                             """)
                             interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon, forward_price)
                             if interactive_density_fig:
@@ -744,7 +744,7 @@ if df is not None and len(df) > 10:
                 High-volume price levels act as strong support or resistance.  
                 Green (support) and red (resistance) zones show SVI-derived S/R levels.  
                 Orange dashed line: POC. Light blue solid line: Current price.
-                Purple shaded area: 68% profitability zone.
+                Purple shaded area: Selected profitability confidence interval.
                 """)
                 volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon, current_price)
                 if volume_profile_fig and poc is not None:
@@ -1029,7 +1029,6 @@ if df is not None and len(df) > 10:
                         st.error(f"Failed to render price path chart: {e}")
 else:
     st.error("Could not load or process spot data. Check parameters or try again.")
-# --- Custom CSS ---
 st.markdown("""
 <style>
     .tooltip {
