@@ -9,33 +9,30 @@ from geomstats.geometry.riemannian_metric import RiemannianMetric
 import geomstats.geometry.euclidean
 import geomstats
 from scipy.integrate import solve_ivp
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde, norm
 from scipy.signal import find_peaks
 from scipy.interpolate import interp1d
+from scipy.optimize import minimize
 from sklearn.cluster import DBSCAN
-from sklearn.metrics import pairwise_distances
 import warnings
 from joblib import Parallel, delayed
-import streamlit.components.v1 as components
 import requests
 from datetime import datetime, timezone, timedelta
 import re
 import logging
 from typing import Optional, Dict, List
-from scipy.stats import norm
-from scipy.optimize import minimize, brentq
 
 # --- Global Settings ---
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
 st.set_page_config(layout="wide")
-st.title("BTC/USD Price and Options Analysis on a Volatility-Weighted Manifold")
+st.title("BTC/USD Price and Options-Based S/R Analysis on a Volatility-Weighted Manifold")
 st.markdown("""
-This application models the Bitcoin market as a 2D geometric space (manifold) of (Time, Log-Price), warped by GARCH-derived volatility, and integrates options-based probability analysis.  
+This application models the Bitcoin market as a 2D geometric space (manifold) of (Time, Log-Price), warped by GARCH-derived volatility, with support/resistance (S/R) levels derived from options data using the SVI model.  
 - **Geodesic (Red Line):** The "straightest" path through the volatility landscape.  
-- **S/R Grid:** Support (green) and resistance (red) levels from Monte Carlo simulations.  
+- **S/R Grid:** Support (green) and resistance (red) levels from the SVI implied probability density.  
 - **Volume Profile:** Historical trading activity with S/R levels, POC (orange), and current price (light blue).  
-- **Options Analysis:** Implied probability density from SABR model and top trade ideas based on mispricing.  
+- **Options Analysis:** Implied probability density from SVI model, with S/R levels overlaid.  
 *Use the sidebar to adjust parameters. Hover over charts for details.*
 """)
 
@@ -118,24 +115,6 @@ def geodesic_equation(s, y, metric_obj):
     accel = -np.einsum('ijk,j,k->i', gamma, vel, vel)
     return np.concatenate([vel, accel])
 
-def simulate_single_path(p0, mu, sigma, T, N, dt, seed):
-    np.random.seed(seed)
-    path = np.zeros(N)
-    path[0] = p0
-    dW = np.random.normal(0, np.sqrt(dt), N - 1)
-    for j in range(N - 1):
-        path[j + 1] = path[j] * np.exp((mu - 0.5 * sigma[j]**2) * dt + sigma[j] * dW[j])
-    return path
-
-@st.cache_data
-def simulate_paths(p0, mu, sigma, T, N, n_paths):
-    if N < 2:
-        return np.array([[p0]] * n_paths), np.array([0])
-    dt = T / (N - 1)
-    t = np.linspace(0, T, N)
-    paths = Parallel(n_jobs=-1)(delayed(simulate_single_path)(p0, mu, sigma, T, N, dt, i) for i in range(n_paths))
-    return np.array(paths), t
-
 def get_hit_prob(level_list, price_grid, u, metric, T, epsilon, geodesic_prices):
     probs = []
     total_prob = np.trapz(u, price_grid)
@@ -151,13 +130,6 @@ def get_hit_prob(level_list, price_grid, u, metric, T, epsilon, geodesic_prices)
         probs.append(prob)
     total_level_prob = sum(probs) + 1e-10
     return [p / total_level_prob for p in probs] if total_level_prob > 0 else [0] * len(level_list)
-
-def manifold_distance(x, y, metric, T):
-    point_x = np.array([T, x])
-    point_y = np.array([T, y])
-    metric_mat = metric.metric_matrix([T, (x + y) / 2])
-    delta = point_x - point_y
-    return np.sqrt(max(delta.T @ metric_mat @ delta, 1e-6))
 
 def create_interactive_density_chart(price_grid, density, s_levels, r_levels, epsilon):
     if len(price_grid) == 0 or len(density) == 0:
@@ -175,7 +147,7 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
                       layer="below", line_width=0)
         fig.add_vline(x=level, line_color='red', line_dash='dash')
     fig.update_layout(
-        title="Probability Distribution with S/R Zones",
+        title="Options Implied Probability Distribution with S/R Zones",
         xaxis_title="Price (USD)",
         yaxis_title="Density",
         showlegend=False,
@@ -355,240 +327,108 @@ class BlackScholes:
             put_price = self.K * np.exp(-self.r * self.T) * norm.cdf(-self.d2) - self.S * norm.cdf(-self.d1)
         return max(0, call_price), max(0, put_price)
 
-    def calculate_delta(self):
-        if self.sigma_sqrt_T < 1e-9:
-            call_delta = 1.0 if self.S > self.K else (0.0 if self.S < self.K else 0.5)
-            put_delta = -1.0 if self.S < self.K else (0.0 if self.S > self.K else -0.5)
-        else:
-            call_delta = norm.cdf(self.d1)
-            put_delta = norm.cdf(self.d1) - 1.0
-        return call_delta, put_delta
+# --- SVI Functions ---
+def raw_svi_total_variance(k, params):
+    a, b, rho, m, sigma = params['a'], params['b'], params['rho'], params['m'], params['sigma']
+    b = max(0, b)
+    rho = np.clip(rho, -0.9999, 0.9999)
+    sigma = max(1e-5, sigma)
+    return a + b * (rho * (k - m) + np.sqrt((k - m)**2 + sigma**2))
 
-    def calculate_gamma(self):
-        if self.sigma_sqrt_T < 1e-9 or self.S < 1e-9:
-            return 0.0
-        return norm.pdf(self.d1) / (self.S * self.sigma_sqrt_T)
-
-    def calculate_vega(self):
-        if self.sigma_sqrt_T < 1e-9:
-            return 0.0
-        return self.S * norm.pdf(self.d1) * np.sqrt(self.T) * 0.01
-
-    def calculate_vanna(self):
-        if self.sigma_sqrt_T < 1e-9 or self.sigma < 1e-9:
-            return 0.0
-        return -norm.pdf(self.d1) * self.d2 / self.sigma * 0.01
-
-    def calculate_theta(self):
-        if self.sigma_sqrt_T < 1e-9:
-            call_theta_val = -self.r * self.K * np.exp(-self.r * self.T) if self.S < self.K else 0.0
-            put_theta_val = -self.r * self.K * np.exp(-self.r * self.T) if self.S > self.K else 0.0
-            return call_theta_val / 365.25, put_theta_val / 365.25
-        term1_annual = -(self.S * norm.pdf(self.d1) * self.sigma) / (2 * np.sqrt(self.T))
-        call_theta_annual = term1_annual - self.r * self.K * np.exp(-self.r * self.T) * norm.cdf(self.d2)
-        put_theta_annual = term1_annual + self.r * self.K * np.exp(-self.r * self.T) * norm.cdf(-self.d2)
-        return call_theta_annual / 365.25, put_theta_annual / 365.25
-
-# --- Arbitrage-Free SABR Pricer ---
-@st.cache_data(ttl=300)
-def arbitrage_free_sabr_pricer(alpha: float, beta: float, rho: float, nu: float, F: float, T: float, K_vals: np.ndarray, r_rate: float = 0.0) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame, float, float]:
-    N_time_steps = 50
-    N_cells = 400
-    N_nodes = N_cells + 1
-    if N_cells < 2:
-        logging.error("N_cells must be at least 2 for PDE scheme.")
-        nan_prices = np.full(len(K_vals), np.nan)
-        return nan_prices, nan_prices, pd.DataFrame({'strike': [], 'pdf': []}), 0.0, 0.0
-    dt = T / N_time_steps
-    vol_approx = alpha * (F**(beta-1)) if beta < 1 and F > 0 else alpha
-    sigma_sqrt_T_approx = vol_approx * np.sqrt(T)
-    F_min_domain = max(0.001, F * np.exp(-7 * sigma_sqrt_T_approx - 0.5 * vol_approx**2 * T))
-    F_max_domain = F * np.exp(7 * sigma_sqrt_T_approx - 0.5 * vol_approx**2 * T)
-    if F_max_domain <= F_min_domain + 0.1:
-        F_max_domain = F_min_domain + max(20, F*2.0)
-    h_cell_width = (F_max_domain - F_min_domain) / N_cells
-    F_comp_nodes = F_min_domain + (np.arange(N_cells) + 0.5) * h_cell_width
-    if h_cell_width <= 1e-9:
-        logging.error(f"h_cell_width too small ({h_cell_width}).")
-        nan_prices = np.full(len(K_vals), np.nan)
-        return nan_prices, nan_prices, pd.DataFrame({'strike': [], 'pdf': []}), 0.0, 0.0
-    C_func = lambda f_val: f_val**beta if f_val > 1e-9 else (0.0 if beta > 1e-9 else 1e-9)
-    if abs(beta - 1.0) < 1e-6:
-        z_func = lambda f_val_loop: (nu / (alpha + 1e-9)) * (np.log(f_val_loop / (F + 1e-9))) if f_val_loop > 1e-9 and F > 1e-9 else 0.0
-    else:
-        z_func = lambda f_val_loop: (nu / (alpha + 1e-9)) * ((f_val_loop**(1.0-beta) - F**(1.0-beta)) / (1.0-beta)) if f_val_loop > 1e-9 and F > 1e-9 else 0.0
-    def Gamma_func(f_val_loop):
-        if abs(f_val_loop - F) < 1e-9:
-            return beta * F**(beta - 1.0) if F > 1e-9 else 0.0
-        return (C_func(f_val_loop) - C_func(F)) / (f_val_loop - F)
-    Qc = np.zeros(N_cells)
-    QL, QR = 0.0, 0.0
-    f_idx_initial = np.searchsorted(F_comp_nodes - h_cell_width/2, F)
-    f_idx_clamped = np.clip(f_idx_initial, 0, N_cells - 1)
-    Qc[f_idx_clamped] = 1.0 / h_cell_width
-    A_tridiag = np.zeros((3, N_cells))
-    for i_time_step in range(1, N_time_steps + 1):
-        current_t = i_time_step * dt
-        Qc_prev_step = Qc.copy()
-        _C_vals = np.array([C_func(f_val) for f_val in F_comp_nodes])
-        _z_vals = np.array([z_func(f_val) for f_val in F_comp_nodes])
-        _Gamma_vals = np.array([Gamma_func(f_val) for f_val in F_comp_nodes])
-        D_sq_coeff_at_comp_nodes_NEW_T = (alpha**2) * (1 + 2*rho*nu*_z_vals + (nu**2)*(_z_vals**2)) * np.exp(rho*nu*_Gamma_vals*current_t) * (_C_vals**2)
-        D_sq_coeff_at_comp_nodes_NEW_T = np.maximum(D_sq_coeff_at_comp_nodes_NEW_T, 1e-12)
-        M_paper_NEW_T = 0.5 * D_sq_coeff_at_comp_nodes_NEW_T
-        D_sq_coeff_at_comp_nodes_OLD_T = (alpha**2) * (1 + 2*rho*nu*_z_vals + (nu**2)*(_z_vals**2)) * np.exp(rho*nu*_Gamma_vals*(current_t - dt)) * (_C_vals**2)
-        D_sq_coeff_at_comp_nodes_OLD_T = np.maximum(D_sq_coeff_at_comp_nodes_OLD_T, 1e-12)
-        M_paper_OLD_T = 0.5 * D_sq_coeff_at_comp_nodes_OLD_T
-        A_tridiag[1, :] = 1.0 + (dt / h_cell_width**2) * M_paper_NEW_T
-        A_tridiag[0, 1:] = -(dt / (2 * h_cell_width**2)) * M_paper_NEW_T[:-1]
-        A_tridiag[2, :-1] = -(dt / (2 * h_cell_width**2)) * M_paper_NEW_T[1:]
-        RHS_vector = np.zeros(N_cells)
-        RHS_vector[1:-1] = Qc_prev_step[1:-1] + (dt / (2 * h_cell_width**2)) * (
-            M_paper_OLD_T[2:] * Qc_prev_step[2:] - 2*M_paper_OLD_T[1:-1] * Qc_prev_step[1:-1] + M_paper_OLD_T[:-2] * Qc_prev_step[:-2]
-        )
-        if N_cells >= 1:
-            rhs_Q0_term = M_paper_OLD_T[1]*Qc_prev_step[1] - 2*M_paper_OLD_T[0]*Qc_prev_step[0]
-            if M_paper_OLD_T[0] > 1e-9:
-                rhs_Q0_term += M_paper_OLD_T[0]*(-Qc_prev_step[0])
-            RHS_vector[0] = Qc_prev_step[0] + (dt / (2 * h_cell_width**2)) * rhs_Q0_term
-            if M_paper_NEW_T[0] > 1e-9:
-                A_tridiag[1,0] = 1.0 + (dt / h_cell_width**2) * M_paper_NEW_T[0] * (1.0 + 0.5)
-                A_tridiag[0,1] = -(dt / (2 * h_cell_width**2)) * M_paper_NEW_T[0]
-        if N_cells >= 2:
-            idx_J = N_cells - 1
-            rhs_QJ_term = M_paper_OLD_T[idx_J-1]*Qc_prev_step[idx_J-1] - 2*M_paper_OLD_T[idx_J]*Qc_prev_step[idx_J]
-            if M_paper_OLD_T[idx_J] > 1e-9:
-                rhs_QJ_term += M_paper_OLD_T[idx_J]*(-Qc_prev_step[idx_J])
-            RHS_vector[idx_J] = Qc_prev_step[idx_J] + (dt / (2 * h_cell_width**2)) * rhs_QJ_term
-            if M_paper_NEW_T[idx_J] > 1e-9:
-                A_tridiag[1,idx_J] = 1.0 + (dt / h_cell_width**2) * M_paper_NEW_T[idx_J] * (1.0 + 0.5)
-                A_tridiag[2,idx_J-1] = -(dt / (2 * h_cell_width**2)) * M_paper_NEW_T[idx_J]
-        try:
-            Qc = np.maximum(solve_banded((1, 1), A_tridiag, RHS_vector), 0)
-        except:
-            A_matrix_full_np = np.diag(A_tridiag[1,:]) + np.diag(A_tridiag[0,1:],1) + np.diag(A_tridiag[2,:-1],-1)
-            try:
-                Qc = np.maximum(np.linalg.solve(A_matrix_full_np, RHS_vector), 0)
-            except:
-                Qc = np.maximum(np.linalg.pinv(A_matrix_full_np) @ RHS_vector, 0)
-        current_total_prob_on_grid = np.sum(Qc * h_cell_width)
-        if current_total_prob_on_grid > 1e-9:
-            Qc = Qc / current_total_prob_on_grid
-    final_pdf_df = pd.DataFrame({'strike': F_comp_nodes, 'pdf': Qc})
-    call_prices = np.zeros_like(K_vals, dtype=float)
-    put_prices = np.zeros_like(K_vals, dtype=float)
-    for i_k, K_strike in enumerate(K_vals):
-        integrand_call_c = np.maximum(0, F_comp_nodes - K_strike) * Qc
-        call_price_c = np.trapezoid(integrand_call_c, F_comp_nodes)
-        integrand_put_c = np.maximum(0, K_strike - F_comp_nodes) * Qc
-        put_price_c = np.trapezoid(integrand_put_c, F_comp_nodes)
-        call_price_from_QR = max(0, F_max_domain - K_strike) * QR if K_strike < F_max_domain else 0
-        put_price_from_QL = max(0, K_strike - F_min_domain) * QL if K_strike > F_min_domain else 0
-        call_prices[i_k] = call_price_c + call_price_from_QR
-        put_prices[i_k] = put_price_c + put_price_from_QL
-    return call_prices, put_prices, final_pdf_df, QL, QR
-
-# --- SABR Calibration ---
-@st.cache_data(ttl=120)
-def calibrate_arbitrage_free_sabr(df_market: pd.DataFrame, F: float, T: float, beta: float, sr_pct: float, use_oi_w: bool, r_rate: float) -> Tuple[Optional[float], Optional[float], Optional[float], float, int]:
-    min_K_calib = F * (1 - sr_pct / 100.0)
-    max_K_calib = F * (1 + sr_pct / 100.0)
-    df_c = df_market[(df_market['strike'] >= min_K_calib) & (df_market['strike'] <= max_K_calib)].copy()
-    if df_c.empty:
-        st.warning(f"No strikes for SABR calibration in {sr_pct}% range of Forward price {F:.2f}.")
-        return None, None, None, np.inf, 0
-    K_for_calib = df_c['strike'].values
-    P_market = df_c['mark_price'].values
-    types_for_calib = df_c['type'].values
-    OI_for_calib = df_c['open_interest'].values
-    nPts = len(K_for_calib)
-    if nPts < 3:
-        st.warning(f"Need at least 3 unique strikes for SABR calibration ({nPts} found).")
-        return None, None, None, np.inf, nPts
-    w_calib = OI_for_calib / np.sum(OI_for_calib) if use_oi_w and np.sum(OI_for_calib) > 0 else np.ones(nPts) / nPts
-    if use_oi_w and np.sum(OI_for_calib) > 0:
-        avg_w = 1.0 / nPts
-        w_calib = np.minimum(w_calib, 5 * avg_w)
-        w_calib /= np.sum(w_calib)
-    iteration_count = 0
-    def sabr_calibration_objective_af(p_params):
-        nonlocal iteration_count
-        iteration_count += 1
-        alpha_cal, rho_cal, nu_cal = p_params
-        call_prices_model, put_prices_model, _unused_pdf, _unused_ql, _unused_qr = arbitrage_free_sabr_pricer(
-            alpha_cal, beta, rho_cal, nu_cal, F, T, K_for_calib, r_rate
-        )
-        P_model = np.where(types_for_calib == 'C', call_prices_model, put_prices_model)
-        price_diff = P_model - P_market
-        penalty = np.sum(np.where(np.abs(price_diff) > 100, 1000 * (np.abs(price_diff) - 100), 0))
-        error = np.sum(w_calib * (price_diff ** 2)) + penalty
-        logging.debug(f"Iter {iteration_count}: alpha={alpha_cal:.4f}, rho={rho_cal:.4f}, nu={nu_cal:.4f}, Error={error:.6e}")
-        return error
-    atm_iv_market_approx = 0.5
-    if 'iv' in df_market.columns and not df_market['iv'].empty:
-        df_strikes_for_atm_iv = df_market[(df_market['strike'].isin(K_for_calib)) & (df_market['iv'].notna()) & (df_market['iv'] > 0)]
-        if not df_strikes_for_atm_iv.empty:
-            df_strikes_for_atm_iv = df_strikes_for_atm_iv.sort_values('strike')
-            atm_iv_interp = np.interp(F, df_strikes_for_atm_iv['strike'], df_strikes_for_atm_iv['iv'],
-                                    left=df_strikes_for_atm_iv['iv'].iloc[0],
-                                    right=df_strikes_for_atm_iv['iv'].iloc[-1])
-            if pd.notna(atm_iv_interp) and atm_iv_interp > 0:
-                atm_iv_market_approx = atm_iv_interp
-    wing_iv_low = df_market[df_market['strike'] < F]['iv'].mean() if not df_market[df_market['strike'] < F].empty else atm_iv_market_approx
-    wing_iv_high = df_market[df_market['strike'] > F]['iv'].mean() if not df_market[df_market['strike'] > F].empty else atm_iv_market_approx
-    initial_alpha = max(0.01, atm_iv_market_approx * 1.3 * (1 + 0.5 * (wing_iv_low - wing_iv_high) / atm_iv_market_approx))
-    initial_guess_sabr = [initial_alpha, 0.2, 0.4]
-    bounds_sabr = [(0.05, 1.5), (-0.8, 0.8), (0.05, 1.5)]
+def check_svi_butterfly_arbitrage_gk(k_val, svi_params, T_expiry):
+    w_func = lambda x_k_internal: raw_svi_total_variance(x_k_internal, svi_params)
     try:
-        logging.info(f"Starting Arbitrage-Free SABR calibration with F={F:.2f}, T={T:.4f}, beta={beta:.2f}, sr_pct={sr_pct}%.")
-        res_sabr = minimize(
-            sabr_calibration_objective_af, initial_guess_sabr,
-            method='L-BFGS-B', bounds=bounds_sabr,
-            options={'ftol': 1e-9, 'gtol': 1e-7, 'maxiter': 1000, 'eps': 1e-8}
-        )
-        if res_sabr.success or res_sabr.status in [0, 1, 2]:
-            alpha_opt, rho_opt, nu_opt = res_sabr.x
-            alpha_opt = max(bounds_sabr[0][0], min(alpha_opt, bounds_sabr[0][1]))
-            rho_opt = max(bounds_sabr[1][0], min(rho_opt, bounds_sabr[1][1]))
-            nu_opt = max(bounds_sabr[2][0], min(nu_opt, bounds_sabr[2][1]))
-            logging.info(f"Arbitrage-Free SABR Calib Success: alpha={alpha_opt:.3f}, rho={rho_opt:.3f}, nu={nu_opt:.3f}, Error={res_sabr.fun:.2e}")
-            return alpha_opt, rho_opt, nu_opt, res_sabr.fun, nPts
-        else:
-            st.error(f"Arbitrage-Free SABR Calibration failed: {res_sabr.message}")
-            return None, None, None, np.inf, nPts
-    except Exception as e:
-        st.error(f"Arbitrage-Free SABR Calibration Exception: {e}")
-        logging.error(f"Arbitrage-Free SABR Calib Exception: {e}", exc_info=True)
-        return None, None, None, np.inf, nPts
+        w_k = w_func(k_val)
+        if w_k <= 1e-9:
+            return -1e9
+        eps = 1e-5
+        w_k_plus_eps = w_func(k_val + eps)
+        w_k_minus_eps = w_func(k_val - eps)
+        dw_dk = (w_k_plus_eps - w_k_minus_eps) / (2 * eps)
+        d2w_dk2 = (w_k_plus_eps - 2 * w_k + w_k_minus_eps) / (eps**2)
+    except:
+        logging.error(f"Error in SVI butterfly arbitrage check for k={k_val}")
+        return -1e9
+    term1_denom = 2 * w_k
+    if abs(term1_denom) < 1e-9:
+        return -1e9
+    term1_num_factor = k_val * dw_dk / term1_denom
+    term1 = (1 - term1_num_factor)**2
+    term2_factor = (dw_dk / 2)**2
+    term2_bracket_denom = w_k
+    if abs(term2_bracket_denom) < 1e-9:
+        return -1e9
+    term2_bracket = (1 / term2_bracket_denom) + 0.25
+    term2 = term2_factor * term2_bracket
+    term3 = d2w_dk2 / 2.0
+    g_k = term1 - term2 + term3
+    return g_k
 
-# --- Trade Ideas Function ---
-def generate_trade_ideas(df_options: pd.DataFrame, spot_price: float, top_n: int = 3) -> pd.DataFrame:
-    if df_options.empty or not all(c in df_options.columns for c in ['strike', 'type', 'mark_price', 'delta', 'svi_dollar_mispricing']):
-        return pd.DataFrame()
-    df = df_options.copy()
-    df['score'] = df.apply(
-        lambda row: (row['svi_dollar_mispricing'] / row['mark_price'] if row['mark_price'] > 0 else 0) + (1 - abs(row['delta'])),
-        axis=1
-    )
-    short_calls = df[(df['type'] == 'C') & (df['strike'] > spot_price) & (df['score'] > 0)].sort_values('score', ascending=False).head(top_n)
-    short_puts = df[(df['type'] == 'P') & (df['strike'] < spot_price) & (df['score'] > 0)].sort_values('score', ascending=False).head(top_n)
-    if short_calls.empty and short_puts.empty:
-        return pd.DataFrame()
-    trades = pd.concat([short_calls, short_puts])
-    trades['candidate_type'] = np.where(trades['type'] == 'C', 'Short Call', 'Short Put')
-    trades['display_name'] = trades.apply(lambda r: f"{r['type']} K={r['strike']:,.0f}", axis=1)
-    trades['details'] = trades.apply(
-        lambda r: f"Premium: ${r['mark_price']:.2f}, Misprice: ${r['svi_dollar_mispricing']:.2f}, Delta: {r['delta']:.2f}",
-        axis=1
-    )
-    trades['rank'] = trades.groupby('candidate_type')['score'].rank(ascending=False, method='first').astype(int)
-    return trades
+def check_raw_svi_params_validity(params):
+    a, b, rho, sigma = params['a'], params.get('b', 0), params.get('rho', 0), params.get('sigma', 1e-3)
+    if b < 0 or not (-1 < rho < 1) or sigma <= 0:
+        return False
+    return (a + b * sigma * np.sqrt(1 - rho**2)) >= -1e-9
+
+def svi_objective_function(svi_params_array, market_ivs, market_ks, T, F, weights):
+    params = {'a': svi_params_array[0], 'b': svi_params_array[1], 'rho': svi_params_array[2],
+              'm': svi_params_array[3], 'sigma': svi_params_array[4]}
+    if not check_raw_svi_params_validity(params):
+        return 1e12
+    model_total_variances = raw_svi_total_variance(market_ks, params)
+    if np.any(model_total_variances < 0):
+        return 1e10 + np.sum(np.abs(model_total_variances[model_total_variances < 0]))
+    model_ivs = np.sqrt(np.maximum(model_total_variances, 1e-9) / T)
+    error = np.sum(weights * ((model_ivs - market_ivs)**2))
+    g_atm = check_svi_butterfly_arbitrage_gk(0.0, params, T)
+    if g_atm < -1e-5:
+        error += 1e6 * abs(g_atm)
+    if params['b'] * (1 + abs(params['rho'])) * T > 4.0 + 0.1:
+        error += 1e5
+    return error
+
+@st.cache_data(ttl=120)
+def calibrate_raw_svi(market_ivs, market_strikes, F, T, initial_params_dict=None, weights=None):
+    market_ks = np.log(np.maximum(market_strikes, 1e-6) / F)
+    if weights is None:
+        weights = np.ones_like(market_ivs) / len(market_ivs)
+    weights = np.array(weights) / np.sum(weights)
+    if initial_params_dict:
+        p0 = [initial_params_dict['a'], initial_params_dict['b'], initial_params_dict['rho'],
+              initial_params_dict['m'], initial_params_dict['sigma']]
+    else:
+        atm_total_var_approx = np.interp(0, market_ks, market_ivs**2 * T, left=(market_ivs[0]**2*T), right=(market_ivs[-1]**2*T))
+        p0 = [atm_total_var_approx * 0.9, 0.1, -0.4, 0.0, 0.2]
+    bounds = [(None, None), (1e-5, 2.0/T if T > 0 else 20.0), (-0.999, 0.999), (-2.0, 2.0), (1e-4, 3.0)]
+    result = minimize(svi_objective_function, p0, args=(market_ivs, market_ks, T, F, weights),
+                     method='L-BFGS-B', bounds=bounds, options={'ftol': 1e-8, 'gtol': 1e-6, 'maxiter': 500})
+    if result.success or result.status in [0,1,2]:
+        cal_p = {'a': result.x[0], 'b': result.x[1], 'rho': result.x[2], 'm': result.x[3], 'sigma': result.x[4]}
+        logging.info(f"SVI Calibration Success: {result.message}, Error: {result.fun:.2e}, Params: {cal_p}")
+        return cal_p, result.fun
+    logging.error(f"SVI Calibration failed: {result.message}")
+    return None, np.inf
+
+def get_pdf_from_svi_prices(K_grid_dense, call_prices_svi, r_rate, T_expiry):
+    if len(K_grid_dense) != len(call_prices_svi) or len(K_grid_dense) < 3:
+        return pd.DataFrame({'strike': K_grid_dense, 'pdf': np.nan})
+    dK = K_grid_dense[1] - K_grid_dense[0]
+    if dK <= 1e-6:
+        return pd.DataFrame({'strike': K_grid_dense, 'pdf': np.nan})
+    d2C_dK2 = np.zeros_like(call_prices_svi)
+    d2C_dK2[1:-1] = (call_prices_svi[2:] - 2*call_prices_svi[1:-1] + call_prices_svi[:-2]) / (dK**2)
+    d2C_dK2[0] = d2C_dK2[1]
+    d2C_dK2[-1] = d2C_dK2[-2]
+    pdf_values = np.exp(r_rate * T_expiry) * d2C_dK2
+    pdf_values = np.maximum(pdf_values, 0)
+    integral_pdf = np.trapezoid(pdf_values, K_grid_dense)
+    if integral_pdf > 1e-6:
+        pdf_values /= integral_pdf
+    return pd.DataFrame({'strike': K_grid_dense, 'pdf': pdf_values})
 
 # --- Main Application Logic ---
 st.sidebar.header("Model Parameters")
 days_history = st.sidebar.slider("Historical Data (Days)", 7, 90, 30)
-n_paths = st.sidebar.slider("Simulated Paths", 500, 5000, 2000, step=100)
-n_display_paths = st.sidebar.slider("Displayed Paths", 10, 100, 50, step=10)
 epsilon_factor = st.sidebar.slider("Probability Range Factor", 0.1, 2.0, 0.5, step=0.05)
 st.sidebar.header("Options Analysis Parameters")
 all_instruments = get_thalex_instruments()
@@ -596,12 +436,10 @@ coin = "BTC"
 expiries = get_expiries_from_instruments(all_instruments, coin)
 sel_expiry = st.sidebar.selectbox("Options Expiry", expiries, index=0) if expiries else None
 r_rate = st.sidebar.slider("Interest Rate (%)", 0.0, 10.0, 1.6, 0.1) / 100.0
-beta_sabr = st.sidebar.slider("SABR Beta", 0.0, 1.0, 0.9, 0.01)
-sr_pct = st.sidebar.slider("SABR Strike Range (%)", 5, 100, 40, 1)
 use_oi_weights = st.sidebar.checkbox("Use OI Weights", value=True)
 reset_button = st.sidebar.button("Reset to Defaults")
 if reset_button:
-    days_history, n_paths, n_display_paths, epsilon_factor = 30, 2000, 50, 0.5
+    days_history, epsilon_factor = 30, 0.5
 
 end_date = pd.Timestamp.now(tz='UTC')
 start_date = end_date - pd.Timedelta(days=days_history)
@@ -630,153 +468,42 @@ if df is not None and len(df) > 10:
                 st.warning("GARCH fitting failed. Using empirical volatility.")
                 sigma = np.full(N, returns.std() / 100 if not returns.empty else 0.02)
                 st.write(f"Empirical volatility: {sigma[0]:.6f}")
-        mu = returns.mean() / 100 if not returns.empty else 0
-        with st.spinner("Simulating price paths..."):
-            paths, t = simulate_paths(p0, mu, sigma, T, N, n_paths)
         col1, col2 = st.columns([2, 1])
         with col1:
-            st.subheader("Price Paths and Geodesic")
-            final_prices = paths[:, -1]
-            price_std = np.std(final_prices)
-            price_mean = np.mean(final_prices)
-            if np.isnan(price_std) or np.isnan(price_mean):
-                st.error("Invalid price statistics.")
+            st.subheader("Price Path and Geodesic")
+            with st.spinner("Computing geodesic path..."):
+                delta_p = prices[-1] - p0
+                recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
+                y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
+                t_eval = np.linspace(0, T, min(N, 100))
+                metric = VolatilityMetric(sigma, t, T)
+                try:
+                    sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), t_eval=t_eval, rtol=1e-5, method='Radau')
+                    geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
+                except:
+                    st.warning("Geodesic computation failed. Using linear path.")
+                    linear_times = np.linspace(0, T, min(N, 100))
+                    linear_prices = np.linspace(p0, prices[-1], min(N, 100))
+                    volatility_adjustment = np.interp(linear_times, t, sigma)
+                    adjusted_prices = linear_prices * (1 + 0.1 * volatility_adjustment)
+                    geodesic_df = pd.DataFrame({"Time": linear_times, "Price": adjusted_prices, "Path": "Geodesic"})
+            if not geodesic_df.empty:
+                base = alt.Chart(geodesic_df).encode(
+                    x=alt.X("Time:Q", title="Time (hours)"),
+                    y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False))
+                )
+                geodesic_line = base.mark_line(strokeWidth=3, color="red").encode(detail='Path:N')
+                chart = geodesic_line.properties(title="Price Path and Geodesic", height=500).interactive()
+                try:
+                    st.altair_chart(chart, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Failed to render price path chart: {e}")
             else:
-                kde = gaussian_kde(final_prices, bw_method='scott')
-                kde.set_bandwidth(bw_method=kde.factor * (1.5 if price_std / price_mean < 0.02 else 1.0))
-                price_grid = np.linspace(final_prices.min(), final_prices.max(), 1000)
-                u = kde(price_grid)
-                u /= np.trapz(u, price_grid) + 1e-10
-                with st.spinner("Computing geodesic path..."):
-                    delta_p = prices[-1] - p0
-                    recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
-                    y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
-                    t_eval = np.linspace(0, T, min(N, 100))
-                    metric = VolatilityMetric(sigma, t, T)
-                    try:
-                        sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), t_eval=t_eval, rtol=1e-5, method='Radau')
-                        geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
-                    except:
-                        st.warning("Geodesic computation failed. Using linear path.")
-                        linear_times = np.linspace(0, T, min(N, 100))
-                        linear_prices = np.linspace(p0, prices[-1], min(N, 100))
-                        volatility_adjustment = np.interp(linear_times, t, sigma)
-                        adjusted_prices = linear_prices * (1 + 0.1 * volatility_adjustment)
-                        geodesic_df = pd.DataFrame({"Time": linear_times, "Price": adjusted_prices, "Path": "Geodesic"})
-                geodesic_price = np.interp(T, geodesic_df["Time"], geodesic_df["Price"]) if not geodesic_df.empty else price_mean
-                geodesic_weights = np.exp(-np.abs(price_grid - geodesic_price) / (2 * price_std))
-                u_weighted = u * geodesic_weights
-                from scipy.ndimage import gaussian_filter1d
-                u_smooth = gaussian_filter1d(u_weighted, sigma=2)
-                peak_height = np.percentile(u_smooth, 75)
-                peak_distance = max(10, len(price_grid) // 50)
-                peaks, _ = find_peaks(u_smooth, height=peak_height, distance=peak_distance)
-                if len(peaks) < 4:
-                    peaks, _ = find_peaks(u_smooth, height=0.01 * u_smooth.max(), distance=peak_distance // 2)
-                levels = price_grid[peaks]
-                warning_message = None
-                if len(peaks) < 4:
-                    warning_message = "Insufficient peaks detected. Using DBSCAN clustering."
-                    X = final_prices.reshape(-1, 1)
-                    db = DBSCAN(eps=price_std / 2, min_samples=50).fit(X)
-                    labels = db.labels_
-                    unique_labels = set(labels) - {-1}
-                    if unique_labels:
-                        cluster_centers = [np.mean(final_prices[labels == label]) for label in unique_labels]
-                        levels = np.sort(cluster_centers)[:6]
-                    else:
-                        top_indices = np.argsort(u_smooth)[-4:]
-                        levels = np.sort(price_grid[top_indices])
-                median_of_peaks = np.median(levels)
-                support_levels = levels[levels <= median_of_peaks][:2]
-                resistance_levels = levels[levels > median_of_peaks][-2:]
-                path_data = [{"Time": t[j], "Price": paths[i, j], "Path": f"Path_{i}"}
-                             for i in range(min(n_paths, n_display_paths)) for j in range(N)]
-                plot_df = pd.DataFrame(path_data)
-                if not geodesic_df.empty:
-                    plot_df = pd.concat([plot_df, geodesic_df])
-                if plot_df.empty or plot_df[['Time', 'Price']].isna().any().any():
-                    st.error("Main chart data is empty or contains NaN values.")
-                else:
-                    support_df = pd.DataFrame({"Price": support_levels})
-                    resistance_df = pd.DataFrame({"Price": resistance_levels})
-                    base = alt.Chart(plot_df).encode(
-                        x=alt.X("Time:Q", title="Time (hours)"),
-                        y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False))
-                    )
-                    path_lines = base.mark_line(opacity=0.2).encode(
-                        color=alt.value('gray'), detail='Path:N'
-                    ).transform_filter(alt.datum.Path != "Geodesic")
-                    geodesic_line = base.mark_line(strokeWidth=3, color="red").transform_filter(alt.datum.Path == "Geodesic")
-                    support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
-                    resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
-                    chart = (path_lines + geodesic_line + support_lines + resistance_lines).properties(
-                        title="Price Paths, Geodesic, and S/R Grid", height=500
-                    ).interactive()
-                    try:
-                        st.altair_chart(chart, use_container_width=True)
-                    except Exception as e:
-                        st.error(f"Failed to render main chart: {e}")
-        with col2:
-            st.subheader("Projected S/R Probabilities")
-            epsilon = epsilon_factor * np.std(final_prices)
-            if np.isnan(epsilon):
-                st.error("Invalid epsilon value for probability zones.")
-            else:
-                support_probs = get_hit_prob(support_levels, price_grid, u, metric, T, epsilon, geodesic_df)
-                resistance_probs = get_hit_prob(resistance_levels, price_grid, u, metric, T, epsilon, geodesic_df)
-                sub_col1, sub_col2 = st.columns(2)
-                with sub_col1:
-                    st.markdown("**Support Levels**")
-                    support_data = pd.DataFrame({'Level': support_levels, 'Hit %': support_probs})
-                    if support_data.empty or support_data.isna().any().any():
-                        st.warning("Support levels data is empty or contains NaN values.")
-                    else:
-                        st.dataframe(support_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
-
-                with sub_col2:
-                    st.markdown("**Resistance Levels**")
-                    resistance_data = pd.DataFrame({'Level': resistance_levels, 'Hit %': resistance_probs})
-                    if resistance_data.empty or resistance_data.isna().any().any():
-                        st.warning("Resistance levels data is empty or contains NaN values.")
-                    else:
-                        st.dataframe(resistance_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
-
-                with st.expander("Tune Probability Range Factor", expanded=True):
-                    st.markdown("""
-                    Adjust the 'Probability Range Factor' to control S/R zone width.  
-                    - Smaller values: tighter zones.  
-                    - Larger values: broader zones.  
-                    **Recommended: 0.3–0.7.**
-                    """)
-                    interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon)
-                    if interactive_density_fig:
-                        try:
-                            st.plotly_chart(interactive_density_fig, use_container_width=True)
-                        except Exception as e:
-                            st.error(f"Failed to render density chart: {e}")
-                    if warning_message:
-                        st.info(warning_message)
-
-        st.header("Historical Context: Volume-by-Price Analysis")
-        st.markdown("""
-        High-volume price levels act as strong support or resistance.  
-        Green (support) and red (resistance) zones show simulated S/R levels.  
-        Orange dashed line: POC. Light blue solid line: Current price.
-        """)
-        volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon, current_price)
-        if volume_profile_fig and poc is not None:
-            try:
-                st.plotly_chart(volume_profile_fig, use_container_width=True)
-                st.metric("Point of Control (POC)", f"${poc['price_bin']:,.2f}")
-                if current_price and not np.isnan(current_price):
-                    st.metric("Current Price", f"${current_price:,.2f}")
-            except Exception as e:
-                st.error(f"Failed to render volume profile chart: {e}")
+                st.error("Geodesic path is empty.")
 
         # --- Options Analysis ---
         if sel_expiry:
-            st.header("Options-Based Probability Analysis")
+            st.header("Options-Based S/R Analysis")
             with st.spinner("Fetching options data..."):
                 df_options = get_thalex_options_data(coin, sel_expiry, all_instruments)
             if df_options is not None and not df_options.empty:
@@ -787,60 +514,150 @@ if df is not None and len(df) > 10:
                 perp_ticker = get_thalex_ticker(f"{coin}-PERPETUAL")
                 spot_price = float(perp_ticker['mark_price']) if perp_ticker and perp_ticker.get('mark_price') else current_price
                 forward_price = spot_price * np.exp(r_rate * ttm)
-                with st.spinner("Calibrating Arbitrage-Free SABR..."):
-                    alpha, rho, nu, calib_error, n_points = calibrate_arbitrage_free_sabr(
-                        df_options, forward_price, ttm, beta_sabr, sr_pct, use_oi_weights, r_rate
-                    )
-                if alpha is not None:
-                    st.subheader("SABR Calibration Results")
-                    sabr_cols = st.columns(4)
-                    sabr_cols[0].metric("Alpha", f"{alpha:.3f}")
-                    sabr_cols[1].metric("Rho", f"{rho:.3f}")
-                    sabr_cols[2].metric("Nu", f"{nu:.3f}")
-                    sabr_cols[3].metric("Calibration Error", f"{calib_error:.2e}")
-                    strikes = np.linspace(df_options['strike'].min(), df_options['strike'].max(), 100)
-                    call_prices, put_prices, pdf_df, QL, QR = arbitrage_free_sabr_pricer(
-                        alpha, beta_sabr, rho, nu, forward_price, ttm, strikes, r_rate
-                    )
-                    df_options['model_price'] = df_options.apply(
-                        lambda r: call_prices[np.argmin(np.abs(strikes - r['strike']))] if r['type'] == 'C' else
-                                  put_prices[np.argmin(np.abs(strikes - r['strike']))],
-                        axis=1
-                    )
-                    df_options['svi_dollar_mispricing'] = df_options['mark_price'] - df_options['model_price']
-                    st.subheader("Implied Probability Density (Options)")
-                    pdf_chart = alt.Chart(pdf_df[pdf_df['pdf'] > 1e-7]).mark_area(opacity=0.7, color='purple').encode(
-                        x=alt.X('strike:Q', title='Price ($)'),
-                        y=alt.Y('pdf:Q', title='Probability Density', axis=alt.Axis(format='.2e')),
-                        tooltip=['strike', alt.Tooltip('pdf:Q', format='.4e')]
-                    ).properties(title=f"Options Implied PDF for {sel_expiry}", width=700)
-                    st.altair_chart(pdf_chart.interactive(), use_container_width=True)
-                    st.subheader("Trade Ideas (Options-Based)")
-                    trade_ideas = generate_trade_ideas(df_options, spot_price, top_n=3)
-                    if not trade_ideas.empty:
-                        trade_chart = alt.Chart(trade_ideas).mark_bar().encode(
-                            y=alt.Y('display_name:N', title='Trade', sort=None),
-                            x=alt.X('score:Q', title='Score'),
-                            color=alt.Color('candidate_type:N', title='Strategy'),
-                            tooltip=['display_name', 'details', 'rank']
-                        ).properties(title="Top Options Trade Ideas", width=700)
-                        st.altair_chart(trade_chart.interactive(), use_container_width=True)
+                with st.spinner("Calibrating SVI model..."):
+                    market_strikes = df_options['strike'].values
+                    market_ivs = df_options['iv'].values
+                    valid_mask = pd.notna(market_ivs) & pd.notna(market_strikes) & (market_ivs > 0.001)
+                    if not np.any(valid_mask):
+                        st.error("No valid market data for SVI calibration.")
+                        svi_params, svi_error = None, np.inf
                     else:
-                        st.info("No viable trade ideas found based on current mispricing.")
+                        market_strikes = market_strikes[valid_mask]
+                        market_ivs = market_ivs[valid_mask]
+                        oi_weights = df_options['open_interest'].reindex(df_options.index[valid_mask]).values
+                        weights = np.ones_like(market_ivs) / len(market_ivs)
+                        if use_oi_weights and np.sum(oi_weights) > 0:
+                            tmp_w = oi_weights / np.sum(oi_weights)
+                            avg_w = 1.0 / len(tmp_w)
+                            tmp_w = np.minimum(tmp_w, 5 * avg_w)
+                            if np.sum(tmp_w) > 0:
+                                weights = tmp_w / np.sum(tmp_w)
+                        svi_params, svi_error = calibrate_raw_svi(market_ivs, market_strikes, forward_price, ttm, weights=weights)
+                if svi_params:
+                    st.subheader("SVI Calibration Results")
+                    svi_cols = st.columns(5)
+                    svi_cols[0].metric("a", f"{svi_params['a']:.3f}")
+                    svi_cols[1].metric("b", f"{svi_params['b']:.3f}")
+                    svi_cols[2].metric("rho", f"{svi_params['rho']:.3f}")
+                    svi_cols[3].metric("m", f"{svi_params['m']:.3f}")
+                    svi_cols[4].metric("sigma", f"{svi_params['sigma']:.3f}")
+                    # Generate PDF
+                    price_grid = np.linspace(max(1, forward_price * 0.3), forward_price * 2.0, 300)
+                    log_moneyness = np.log(np.maximum(price_grid, 1e-6) / forward_price)
+                    svi_total_var = raw_svi_total_variance(log_moneyness, svi_params)
+                    svi_ivs = np.sqrt(np.maximum(svi_total_var, 1e-9) / ttm)
+                    call_prices_svi = np.array([BlackScholes(ttm, K, forward_price, iv, r_rate).calculate_prices()[0]
+                                               for K, iv in zip(price_grid, svi_ivs)])
+                    pdf_df = get_pdf_from_svi_prices(price_grid, call_prices_svi, r_rate, ttm)
+                    # Compute S/R levels
+                    price_std = forward_price * np.mean(svi_ivs) * np.sqrt(ttm)
+                    u = pdf_df['pdf'].values
+                    peak_height = np.percentile(u, 75)
+                    peak_distance = max(10, len(price_grid) // 50)
+                    peaks, _ = find_peaks(u, height=peak_height, distance=peak_distance)
+                    if len(peaks) < 4:
+                        peaks, _ = find_peaks(u, height=0.01 * u.max(), distance=peak_distance // 2)
+                    levels = price_grid[peaks]
+                    warning_message = None
+                    if len(peaks) < 4:
+                        warning_message = "Insufficient peaks detected. Using DBSCAN clustering."
+                        X = price_grid.reshape(-1, 1)
+                        db = DBSCAN(eps=price_std / 2, min_samples=50).fit(X)
+                        labels = db.labels_
+                        unique_labels = set(labels) - {-1}
+                        if unique_labels:
+                            cluster_centers = [np.mean(price_grid[labels == label]) for label in unique_labels]
+                            levels = np.sort(cluster_centers)[:6]
+                        else:
+                            top_indices = np.argsort(u)[-4:]
+                            levels = np.sort(price_grid[top_indices])
+                    median_of_peaks = np.median(levels)
+                    support_levels = levels[levels <= median_of_peaks][:2]
+                    resistance_levels = levels[levels > median_of_peaks][-2:]
+                    # Plot PDF with S/R
+                    with col2:
+                        st.subheader("S/R Probabilities (SVI-Based)")
+                        epsilon = epsilon_factor * price_std
+                        if np.isnan(epsilon):
+                            st.error("Invalid epsilon value for probability zones.")
+                        else:
+                            support_probs = get_hit_prob(support_levels, price_grid, u, metric, ttm, epsilon, geodesic_df)
+                            resistance_probs = get_hit_prob(resistance_levels, price_grid, u, metric, ttm, epsilon, geodesic_df)
+                            sub_col1, sub_col2 = st.columns(2)
+                            with sub_col1:
+                                st.markdown("**Support Levels**")
+                                support_data = pd.DataFrame({'Level': support_levels, 'Hit %': support_probs})
+                                if support_data.empty or support_data.isna().any().any():
+                                    st.warning("Support levels data is empty or contains NaN values.")
+                                else:
+                                    st.dataframe(support_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
+
+                            with sub_col2:
+                                st.markdown("**Resistance Levels**")
+                                resistance_data = pd.DataFrame({'Level': resistance_levels, 'Hit %': resistance_probs})
+                                if resistance_data.empty or resistance_data.isna().any().any():
+                                    st.warning("Resistance levels data is empty or contains NaN values.")
+                                else:
+                                    st.dataframe(resistance_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
+
+                            with st.expander("Tune Probability Range Factor", expanded=True):
+                                st.markdown("""
+                                Adjust the 'Probability Range Factor' to control S/R zone width.  
+                                - Smaller values: tighter zones.  
+                                - Larger values: broader zones.  
+                                **Recommended: 0.3–0.7.**
+                                """)
+                                interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon)
+                                if interactive_density_fig:
+                                    try:
+                                        st.plotly_chart(interactive_density_fig, use_container_width=True)
+                                    except Exception as e:
+                                        st.error(f"Failed to render density chart: {e}")
+                                if warning_message:
+                                    st.info(warning_message)
+                    # Add S/R to price chart
+                    with col1:
+                        support_df = pd.DataFrame({"Price": support_levels})
+                        resistance_df = pd.DataFrame({"Price": resistance_levels})
+                        support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
+                        resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
+                        chart = (geodesic_line + support_lines + resistance_lines).properties(
+                            title="Price Path, Geodesic, and S/R Grid", height=500
+                        ).interactive()
+                        try:
+                            st.altair_chart(chart, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"Failed to render price path chart: {e}")
+                    # Volume Profile
+                    st.header("Historical Context: Volume-by-Price Analysis")
+                    st.markdown("""
+                    High-volume price levels act as strong support or resistance.  
+                    Green (support) and red (resistance) zones show SVI-derived S/R levels.  
+                    Orange dashed line: POC. Light blue solid line: Current price.
+                    """)
+                    volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon, current_price)
+                    if volume_profile_fig and poc is not None:
+                        try:
+                            st.plotly_chart(volume_profile_fig, use_container_width=True)
+                            st.metric("Point of Control (POC)", f"${poc['price_bin']:,.2f}")
+                            if current_price and not np.isnan(current_price):
+                                st.metric("Current Price", f"${current_price:,.2f}")
+                        except Exception as e:
+                            st.error(f"Failed to render volume profile chart: {e}")
+                    # Options Chain
                     st.subheader("Options Chain")
-                    st.dataframe(df_options[['instrument', 'strike', 'type', 'mark_price', 'iv', 'delta', 'svi_dollar_mispricing']].style.format({
+                    st.dataframe(df_options[['instrument', 'strike', 'type', 'mark_price', 'iv', 'delta']].style.format({
                         'strike': '{:,.0f}',
                         'mark_price': '${:.2f}',
                         'iv': '{:.2%}',
-                        'delta': '{:.2f}',
-                        'svi_dollar_mispricing': '${:.2f}'
+                        'delta': '{:.2f}'
                     }))
                 else:
-                    st.error("SABR calibration failed.")
+                    st.error("SVI calibration failed.")
             else:
                 st.error("No valid options data available.")
         else:
-            st.info("Select an options expiry to enable options analysis.")
+            st.info("Select an options expiry to enable S/R analysis.")
 
         # --- Export Results ---
         st.header("Export Results")
@@ -848,11 +665,11 @@ if df is not None and len(df) > 10:
         if export_button:
             with st.spinner("Generating exports..."):
                 try:
-                    chart.save("main_chart.html")
-                    with open("main_chart.html", "rb") as f:
-                        st.download_button("Download Main Chart", f, file_name="main_chart.html")
+                    chart.save("price_chart.html")
+                    with open("price_chart.html", "rb") as f:
+                        st.download_button("Download Price Chart", f, file_name="price_chart.html")
                 except Exception as e:
-                    st.warning(f"Failed to export main chart: {e}")
+                    st.warning(f"Failed to export price chart: {e}")
                 if interactive_density_fig:
                     interactive_density_fig.write_html("density_chart.html")
                     with open("density_chart.html", "rb") as f:
