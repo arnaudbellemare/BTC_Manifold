@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 import re
 import logging
 from typing import Optional, Dict, List
+import time
 
 # --- Global Settings ---
 warnings.filterwarnings("ignore")
@@ -72,26 +73,26 @@ class VolatilityMetric(RiemannianMetric):
 def fetch_kraken_data(symbol, timeframe, start_date, end_date):
     exchange = ccxt.kraken()
     since = int(start_date.timestamp() * 1000)
-    timeframe_seconds = 3600
+    timeframe_seconds = 3600  # 1 hour
     all_ohlcv = []
     max_retries = 5
     progress_bar = st.progress(0)
     while since < int(end_date.timestamp() * 1000):
         for attempt in range(max_retries):
             try:
-                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=720)
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=500)  # Reduced limit to avoid rate limits
                 if not ohlcv:
                     break
                 all_ohlcv.extend(ohlcv)
                 since = int(ohlcv[-1][0]) + timeframe_seconds * 1000
                 progress_bar.progress(min(1.0, since / (end_date.timestamp() * 1000)))
-                time.sleep(2 ** attempt)
+                time.sleep(2)  # Increased delay to respect rate limits
                 break
             except Exception as e:
                 if attempt == max_retries - 1:
                     st.warning(f"Failed to fetch Kraken data after {max_retries} attempts: {e}")
                     break
-                continue
+                time.sleep(2 ** (attempt + 1))  # Exponential backoff
     progress_bar.empty()
     if all_ohlcv:
         df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -250,7 +251,7 @@ def get_thalex_options_data(coin: str, expiry_str: str, instruments: List[Dict])
                 })
             except (ValueError, IndexError):
                 continue
-        time.sleep(0.02)
+        time.sleep(0.05)  # Increased delay for Thalex API
         progress_bar.progress((i + 1) / len(instrument_names))
     progress_bar.empty()
     if not options_data:
@@ -452,13 +453,14 @@ if df is not None and len(df) > 10:
     prices = df['close'].values
     times_pd = df['datetime']
     times = (times_pd - times_pd.iloc[0]).dt.total_seconds() / (24 * 3600)  # Convert to days
-    T = times.iloc[-1] if not times.empty else 0
+    T = times.iloc[-1] if not times.empty else 1.0  # Fallback to 1 day
     N = len(prices)
-    p0 = prices[0]
+    p0 = prices[0] if len(prices) > 0 else 70000  # Fallback price
     returns = 100 * df['close'].pct_change().dropna()
-    current_price = df['close'].iloc[-1] if not df['close'].empty else None
+    current_price = df['close'].iloc[-1] if not df['close'].empty else 70000
     if returns.empty:
-        st.error("No valid returns data.")
+        st.error("No valid returns data. Using default volatility.")
+        sigma = np.full(N, 0.02)
     else:
         with st.spinner("Fitting GARCH model..."):
             try:
@@ -470,223 +472,223 @@ if df is not None and len(df) > 10:
                 st.warning("GARCH fitting failed. Using empirical volatility.")
                 sigma = np.full(N, returns.std() / 100 if not returns.empty else 0.02)
                 st.write(f"Empirical volatility: {sigma[0]:.6f}")
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            st.subheader("Price Path and Geodesic")
-            with st.spinner("Computing geodesic path..."):
-                delta_p = prices[-1] - p0
-                recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
-                y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
-                t_eval = np.linspace(0, T, min(N, 100))
-                metric = VolatilityMetric(sigma, times, T)
-                try:
-                    sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), t_eval=t_eval, rtol=1e-5, method='Radau')
-                    geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
-                except:
-                    st.warning("Geodesic computation failed. Using linear path.")
-                    linear_times = np.linspace(0, T, min(N, 100))
-                    linear_prices = np.linspace(p0, prices[-1], min(N, 100))
-                    volatility_adjustment = np.interp(linear_times, times, sigma)
-                    adjusted_prices = linear_prices * (1 + 0.1 * volatility_adjustment)
-                    geodesic_df = pd.DataFrame({"Time": linear_times, "Price": adjusted_prices, "Path": "Geodesic"})
-        # --- Options Analysis ---
-        if sel_expiry:
-            st.header("Options-Based S/R Analysis (SVI)")
-            with st.spinner("Fetching options data..."):
-                df_options = get_thalex_options_data(coin, sel_expiry, all_instruments)
-            if df_options is not None and not df_options.empty:
-                expiry_dt = datetime.strptime(sel_expiry, "%d%b%y").replace(
-                    hour=8, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
-                )
-                ttm = max((expiry_dt - datetime.now(timezone.utc)).total_seconds() / (365.25 * 24 * 3600), 1e-9)
-                perp_ticker = get_thalex_ticker(f"{coin}-PERPETUAL")
-                spot_price = float(perp_ticker['mark_price']) if perp_ticker and perp_ticker.get('mark_price') else current_price
-                forward_price = spot_price * np.exp(r_rate * ttm)
-                # Use ATM IV from options data as volatility for manifold
-                atm_iv = df_options.iloc[(df_options['strike'] - forward_price).abs().argsort()[:1]]['iv'].iloc[0]
-                if pd.isna(atm_iv) or atm_iv <= 0:
-                    atm_iv = 0.5  # Fallback
-                sigma_options = np.full_like(times, atm_iv)  # Constant IV over TTM
-                metric = VolatilityMetric(sigma_options, times, ttm)
-                with col1:
-                    if not geodesic_df.empty:
-                        base = alt.Chart(geodesic_df).encode(
-                            x=alt.X("Time:Q", title="Time (days)"),
-                            y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False))
-                        )
-                        geodesic_line = base.mark_line(strokeWidth=3, color="red").encode(detail='Path:N')
-                        # S/R levels will be added after computing from SVI
-                with st.spinner("Calibrating SVI model..."):
-                    market_strikes = df_options['strike'].values
-                    market_ivs = df_options['iv'].values
-                    valid_mask = pd.notna(market_ivs) & pd.notna(market_strikes) & (market_ivs > 0.001)
-                    if not np.any(valid_mask):
-                        st.error("No valid market data for SVI calibration.")
-                        svi_params, svi_error = None, np.inf
-                    else:
-                        market_strikes = market_strikes[valid_mask]
-                        market_ivs = market_ivs[valid_mask]
-                        oi_weights = df_options['open_interest'].reindex(df_options.index[valid_mask]).values
-                        weights = np.ones_like(market_ivs) / len(market_ivs)
-                        if use_oi_weights and np.sum(oi_weights) > 0:
-                            tmp_w = oi_weights / np.sum(oi_weights)
-                            avg_w = 1.0 / len(tmp_w)
-                            tmp_w = np.minimum(tmp_w, 5 * avg_w)
-                            if np.sum(tmp_w) > 0:
-                                weights = tmp_w / np.sum(tmp_w)
-                        svi_params, svi_error = calibrate_raw_svi(market_ivs, market_strikes, forward_price, ttm, weights=weights)
-                if svi_params:
-                    st.subheader("SVI Calibration Results")
-                    svi_cols = st.columns(5)
-                    svi_cols[0].metric("a", f"{svi_params['a']:.3f}")
-                    svi_cols[1].metric("b", f"{svi_params['b']:.3f}")
-                    svi_cols[2].metric("rho", f"{svi_params['rho']:.3f}")
-                    svi_cols[3].metric("m", f"{svi_params['m']:.3f}")
-                    svi_cols[4].metric("sigma", f"{svi_params['sigma']:.3f}")
-                    # Generate PDF
-                    price_grid = np.linspace(max(1, forward_price * 0.3), forward_price * 2.0, 300)
-                    log_moneyness = np.log(np.maximum(price_grid, 1e-6) / forward_price)
-                    svi_total_var = raw_svi_total_variance(log_moneyness, svi_params)
-                    svi_ivs = np.sqrt(np.maximum(svi_total_var, 1e-9) / ttm)
-                    call_prices_svi = np.array([BlackScholes(ttm, K, forward_price, iv, r_rate).calculate_prices()[0]
-                                               for K, iv in zip(price_grid, svi_ivs)])
-                    pdf_df = get_pdf_from_svi_prices(price_grid, call_prices_svi, r_rate, ttm)
-                    # Compute S/R levels
-                    price_std = forward_price * np.mean(svi_ivs) * np.sqrt(ttm)
-                    u = pdf_df['pdf'].values
-                    peak_height = np.percentile(u, 75)
-                    peak_distance = max(10, len(price_grid) // 50)
-                    peaks, _ = find_peaks(u, height=peak_height, distance=peak_distance)
-                    if len(peaks) < 4:
-                        peaks, _ = find_peaks(u, height=0.01 * u.max(), distance=peak_distance // 2)
-                    levels = price_grid[peaks]
-                    warning_message = None
-                    if len(peaks) < 4:
-                        warning_message = "Insufficient peaks detected. Using DBSCAN clustering."
-                        X = price_grid.reshape(-1, 1)
-                        db = DBSCAN(eps=price_std / 2, min_samples=50).fit(X)
-                        labels = db.labels_
-                        unique_labels = set(labels) - {-1}
-                        if unique_labels:
-                            cluster_centers = [np.mean(price_grid[labels == label]) for label in unique_labels]
-                            levels = np.sort(cluster_centers)[:6]
-                        else:
-                            top_indices = np.argsort(u)[-4:]
-                            levels = np.sort(price_grid[top_indices])
-                    median_of_peaks = np.median(levels)
-                    support_levels = levels[levels <= median_of_peaks][:2]
-                    resistance_levels = levels[levels > median_of_peaks][-2:]
-                    # Plot PDF with S/R
-                    with col2:
-                        st.subheader("S/R Probabilities (SVI-Based)")
-                        epsilon = epsilon_factor * price_std
-                        if np.isnan(epsilon):
-                            st.error("Invalid epsilon value for probability zones.")
-                        else:
-                            support_probs = get_hit_prob(support_levels, price_grid, u, metric, ttm, epsilon, geodesic_df)
-                            resistance_probs = get_hit_prob(resistance_levels, price_grid, u, metric, ttm, epsilon, geodesic_df)
-                            sub_col1, sub_col2 = st.columns(2)
-                            with sub_col1:
-                                st.markdown("**Support Levels**")
-                                support_data = pd.DataFrame({'Level': support_levels, 'Hit %': support_probs})
-                                if support_data.empty or support_data.isna().any().any():
-                                    st.warning("Support levels data is empty or contains NaN values.")
-                                else:
-                                    st.dataframe(support_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
-
-                            with sub_col2:
-                                st.markdown("**Resistance Levels**")
-                                resistance_data = pd.DataFrame({'Level': resistance_levels, 'Hit %': resistance_probs})
-                                if resistance_data.empty or resistance_data.isna().any().any():
-                                    st.warning("Resistance levels data is empty or contains NaN values.")
-                                else:
-                                    st.dataframe(resistance_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
-
-                            with st.expander("Tune Probability Range Factor", expanded=True):
-                                st.markdown("""
-                                Adjust the 'Probability Range Factor' to control S/R zone width.  
-                                - Smaller values: tighter zones.  
-                                - Larger values: broader zones.  
-                                **Recommended: 0.3–0.7.**
-                                """)
-                                interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon)
-                                if interactive_density_fig:
-                                    try:
-                                        st.plotly_chart(interactive_density_fig, use_container_width=True)
-                                    except Exception as e:
-                                        st.error(f"Failed to render density chart: {e}")
-                                if warning_message:
-                                    st.info(warning_message)
-                    # Add S/R to price chart
-                    with col1:
-                        support_df = pd.DataFrame({"Price": support_levels})
-                        resistance_df = pd.DataFrame({"Price": resistance_levels})
-                        support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
-                        resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
-                        chart = (geodesic_line + support_lines + resistance_lines).properties(
-                            title="Price Path, Geodesic, and S/R Grid", height=500
-                        ).interactive()
-                        try:
-                            st.altair_chart(chart, use_container_width=True)
-                        except Exception as e:
-                            st.error(f"Failed to render price path chart: {e}")
-                    # Volume Profile
-                    st.header("Historical Context: Volume-by-Price Analysis")
-                    st.markdown("""
-                    High-volume price levels act as strong support or resistance.  
-                    Green (support) and red (resistance) zones show SVI-derived S/R levels.  
-                    Orange dashed line: POC. Light blue solid line: Current price.
-                    """)
-                    volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon, current_price)
-                    if volume_profile_fig and poc is not None:
-                        try:
-                            st.plotly_chart(volume_profile_fig, use_container_width=True)
-                            st.metric("Point of Control (POC)", f"${poc['price_bin']:,.2f}")
-                            if current_price and not np.isnan(current_price):
-                                st.metric("Current Price", f"${current_price:,.2f}")
-                        except Exception as e:
-                            st.error(f"Failed to render volume profile chart: {e}")
-                    # Options Chain
-                    st.subheader("Options Chain")
-                    st.dataframe(df_options[['instrument', 'strike', 'type', 'mark_price', 'iv', 'delta']].style.format({
-                        'strike': '{:,.0f}',
-                        'mark_price': '${:.2f}',
-                        'iv': '{:.2%}',
-                        'delta': '{:.2f}'
-                    }))
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.subheader("Price Path and Geodesic")
+        with st.spinner("Computing geodesic path..."):
+            delta_p = prices[-1] - p0 if len(prices) > 1 else 0
+            recent_returns = returns[-min(24, len(returns)):].mean() / 100 if len(returns) > 1 else 0
+            y0 = np.concatenate([np.array([0.0, p0]), np.array([1.0, delta_p / T + recent_returns])])
+            t_eval = np.linspace(0, T, min(N, 100))
+            metric = VolatilityMetric(sigma, times, T)
+            try:
+                sol = solve_ivp(geodesic_equation, [0, T], y0, args=(metric,), t_eval=t_eval, rtol=1e-5, method='Radau')
+                geodesic_df = pd.DataFrame({"Time": sol.y[0, :], "Price": sol.y[1, :], "Path": "Geodesic"})
+            except:
+                st.warning("Geodesic computation failed. Using linear path.")
+                linear_times = np.linspace(0, T, min(N, 100))
+                linear_prices = np.linspace(p0, current_price, min(N, 100))
+                volatility_adjustment = np.interp(linear_times, times, sigma)
+                adjusted_prices = linear_prices * (1 + 0.1 * volatility_adjustment)
+                geodesic_df = pd.DataFrame({"Time": linear_times, "Price": adjusted_prices, "Path": "Geodesic"})
+    # --- Options Analysis ---
+    if sel_expiry:
+        st.header("Options-Based S/R Analysis (SVI)")
+        with st.spinner("Fetching options data..."):
+            df_options = get_thalex_options_data(coin, sel_expiry, all_instruments)
+        if df_options is not None and not df_options.empty:
+            expiry_dt = datetime.strptime(sel_expiry, "%d%b%y").replace(
+                hour=8, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+            )
+            ttm = max((expiry_dt - datetime.now(timezone.utc)).total_seconds() / (365.25 * 24 * 3600), 1e-9)
+            perp_ticker = get_thalex_ticker(f"{coin}-PERPETUAL")
+            spot_price = float(perp_ticker['mark_price']) if perp_ticker and perp_ticker.get('mark_price') else current_price
+            forward_price = spot_price * np.exp(r_rate * ttm)
+            # Use ATM IV from options data as volatility for manifold
+            atm_iv = df_options.iloc[(df_options['strike'] - forward_price).abs().argsort()[:1]]['iv'].iloc[0]
+            if pd.isna(atm_iv) or atm_iv <= 0:
+                atm_iv = 0.5  # Fallback
+            sigma_options = np.full_like(times, atm_iv)  # Constant IV over TTM
+            metric = VolatilityMetric(sigma_options, times, ttm)
+            with col1:
+                if not geodesic_df.empty:
+                    base = alt.Chart(geodesic_df).encode(
+                        x=alt.X("Time:Q", title="Time (days)"),
+                        y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False))
+                    )
+                    geodesic_line = base.mark_line(strokeWidth=3, color="red").encode(detail='Path:N')
+                    # S/R levels will be added after computing from SVI
+            with st.spinner("Calibrating SVI model..."):
+                market_strikes = df_options['strike'].values
+                market_ivs = df_options['iv'].values
+                valid_mask = pd.notna(market_ivs) & pd.notna(market_strikes) & (market_ivs > 0.001)
+                if not np.any(valid_mask):
+                    st.error("No valid market data for SVI calibration.")
+                    svi_params, svi_error = None, np.inf
                 else:
-                    st.error("SVI calibration failed.")
-            else:
-                st.error("No valid options data available.")
-        else:
-            st.info("Select an options expiry to enable S/R analysis.")
+                    market_strikes = market_strikes[valid_mask]
+                    market_ivs = market_ivs[valid_mask]
+                    oi_weights = df_options['open_interest'].reindex(df_options.index[valid_mask]).values
+                    weights = np.ones_like(market_ivs) / len(market_ivs)
+                    if use_oi_weights and np.sum(oi_weights) > 0:
+                        tmp_w = oi_weights / np.sum(oi_weights)
+                        avg_w = 1.0 / len(tmp_w)
+                        tmp_w = np.minimum(tmp_w, 5 * avg_w)
+                        if np.sum(tmp_w) > 0:
+                            weights = tmp_w / np.sum(tmp_w)
+                    svi_params, svi_error = calibrate_raw_svi(market_ivs, market_strikes, forward_price, ttm, weights=weights)
+            if svi_params:
+                st.subheader("SVI Calibration Results")
+                svi_cols = st.columns(5)
+                svi_cols[0].metric("a", f"{svi_params['a']:.3f}")
+                svi_cols[1].metric("b", f"{svi_params['b']:.3f}")
+                svi_cols[2].metric("rho", f"{svi_params['rho']:.3f}")
+                svi_cols[3].metric("m", f"{svi_params['m']:.3f}")
+                svi_cols[4].metric("sigma", f"{svi_params['sigma']:.3f}")
+                # Generate PDF
+                price_grid = np.linspace(max(1, forward_price * 0.3), forward_price * 2.0, 300)
+                log_moneyness = np.log(np.maximum(price_grid, 1e-6) / forward_price)
+                svi_total_var = raw_svi_total_variance(log_moneyness, svi_params)
+                svi_ivs = np.sqrt(np.maximum(svi_total_var, 1e-9) / ttm)
+                call_prices_svi = np.array([BlackScholes(ttm, K, forward_price, iv, r_rate).calculate_prices()[0]
+                                           for K, iv in zip(price_grid, svi_ivs)])
+                pdf_df = get_pdf_from_svi_prices(price_grid, call_prices_svi, r_rate, ttm)
+                # Compute S/R levels
+                price_std = forward_price * np.mean(svi_ivs) * np.sqrt(ttm)
+                u = pdf_df['pdf'].values
+                peak_height = np.percentile(u, 75)
+                peak_distance = max(10, len(price_grid) // 50)
+                peaks, _ = find_peaks(u, height=peak_height, distance=peak_distance)
+                if len(peaks) < 4:
+                    peaks, _ = find_peaks(u, height=0.01 * u.max(), distance=peak_distance // 2)
+                levels = price_grid[peaks]
+                warning_message = None
+                if len(peaks) < 4:
+                    warning_message = "Insufficient peaks detected. Using DBSCAN clustering."
+                    X = price_grid.reshape(-1, 1)
+                    db = DBSCAN(eps=price_std / 2, min_samples=50).fit(X)
+                    labels = db.labels_
+                    unique_labels = set(labels) - {-1}
+                    if unique_labels:
+                        cluster_centers = [np.mean(price_grid[labels == label]) for label in unique_labels]
+                        levels = np.sort(cluster_centers)[:6]
+                    else:
+                        top_indices = np.argsort(u)[-4:]
+                        levels = np.sort(price_grid[top_indices])
+                median_of_peaks = np.median(levels)
+                support_levels = levels[levels <= median_of_peaks][:2]
+                resistance_levels = levels[levels > median_of_peaks][-2:]
+                # Plot PDF with S/R
+                with col2:
+                    st.subheader("S/R Probabilities (SVI-Based)")
+                    epsilon = epsilon_factor * price_std
+                    if np.isnan(epsilon):
+                        st.error("Invalid epsilon value for probability zones.")
+                    else:
+                        support_probs = get_hit_prob(support_levels, price_grid, u, metric, ttm, epsilon, geodesic_df)
+                        resistance_probs = get_hit_prob(resistance_levels, price_grid, u, metric, ttm, epsilon, geodesic_df)
+                        sub_col1, sub_col2 = st.columns(2)
+                        with sub_col1:
+                            st.markdown("**Support Levels**")
+                            support_data = pd.DataFrame({'Level': support_levels, 'Hit %': support_probs})
+                            if support_data.empty or support_data.isna().any().any():
+                                st.warning("Support levels data is empty or contains NaN values.")
+                            else:
+                                st.dataframe(support_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
 
-        # --- Export Results ---
-        st.header("Export Results")
-        export_button = st.button("Download Charts and Data")
-        if export_button:
-            with st.spinner("Generating exports..."):
-                try:
-                    chart.save("price_chart.html")
-                    with open("price_chart.html", "rb") as f:
-                        st.download_button("Download Price Chart", f, file_name="price_chart.html")
-                except Exception as e:
-                    st.warning(f"Failed to export price chart: {e}")
-                if interactive_density_fig:
-                    interactive_density_fig.write_html("density_chart.html")
-                    with open("density_chart.html", "rb") as f:
-                        st.download_button("Download Density Chart", f, file_name="density_chart.html")
-                if volume_profile_fig:
-                    volume_profile_fig.write_html("volume_profile.html")
-                    with open("volume_profile.html", "rb") as f:
-                        st.download_button("Download Volume Profile", f, file_name="volume_profile.html")
-                sr_data = pd.concat([
-                    pd.DataFrame({'Type': 'Support', 'Level': support_levels, 'Hit %': support_probs}),
-                    pd.DataFrame({'Type': 'Resistance', 'Level': resistance_levels, 'Hit %': resistance_probs})
-                ])
-                st.download_button("Download S/R Data", sr_data.to_csv(index=False), file_name="sr_levels.csv")
-                if df_options is not None and not df_options.empty:
-                    st.download_button("Download Options Data", df_options.to_csv(index=False), file_name="options_data.csv")
+                        with sub_col2:
+                            st.markdown("**Resistance Levels**")
+                            resistance_data = pd.DataFrame({'Level': resistance_levels, 'Hit %': resistance_probs})
+                            if resistance_data.empty or resistance_data.isna().any().any():
+                                st.warning("Resistance levels data is empty or contains NaN values.")
+                            else:
+                                st.dataframe(resistance_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
+
+                        with st.expander("Tune Probability Range Factor", expanded=True):
+                            st.markdown("""
+                            Adjust the 'Probability Range Factor' to control S/R zone width.  
+                            - Smaller values: tighter zones.  
+                            - Larger values: broader zones.  
+                            **Recommended: 0.3–0.7.**
+                            """)
+                            interactive_density_fig = create_interactive_density_chart(price_grid, u, support_levels, resistance_levels, epsilon)
+                            if interactive_density_fig:
+                                try:
+                                    st.plotly_chart(interactive_density_fig, use_container_width=True)
+                                except Exception as e:
+                                    st.error(f"Failed to render density chart: {e}")
+                            if warning_message:
+                                st.info(warning_message)
+                # Add S/R to price chart
+                with col1:
+                    support_df = pd.DataFrame({"Price": support_levels})
+                    resistance_df = pd.DataFrame({"Price": resistance_levels})
+                    support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
+                    resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
+                    chart = (geodesic_line + support_lines + resistance_lines).properties(
+                        title="Price Path, Geodesic, and S/R Grid", height=500
+                    ).interactive()
+                    try:
+                        st.altair_chart(chart, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Failed to render price path chart: {e}")
+                # Volume Profile
+                st.header("Historical Context: Volume-by-Price Analysis")
+                st.markdown("""
+                High-volume price levels act as strong support or resistance.  
+                Green (support) and red (resistance) zones show SVI-derived S/R levels.  
+                Orange dashed line: POC. Light blue solid line: Current price.
+                """)
+                volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon, current_price)
+                if volume_profile_fig and poc is not None:
+                    try:
+                        st.plotly_chart(volume_profile_fig, use_container_width=True)
+                        st.metric("Point of Control (POC)", f"${poc['price_bin']:,.2f}")
+                        if current_price and not np.isnan(current_price):
+                            st.metric("Current Price", f"${current_price:,.2f}")
+                    except Exception as e:
+                        st.error(f"Failed to render volume profile chart: {e}")
+                # Options Chain
+                st.subheader("Options Chain")
+                st.dataframe(df_options[['instrument', 'strike', 'type', 'mark_price', 'iv', 'delta']].style.format({
+                    'strike': '{:,.0f}',
+                    'mark_price': '${:.2f}',
+                    'iv': '{:.2%}',
+                    'delta': '{:.2f}'
+                }))
+            else:
+                st.error("SVI calibration failed.")
+        else:
+            st.error("No valid options data available.")
+    else:
+        st.info("Select an options expiry to enable S/R analysis.")
+
+    # --- Export Results ---
+    st.header("Export Results")
+    export_button = st.button("Download Charts and Data")
+    if export_button:
+        with st.spinner("Generating exports..."):
+            try:
+                chart.save("price_chart.html")
+                with open("price_chart.html", "rb") as f:
+                    st.download_button("Download Price Chart", f, file_name="price_chart.html")
+            except Exception as e:
+                st.warning(f"Failed to export price chart: {e}")
+            if interactive_density_fig:
+                interactive_density_fig.write_html("density_chart.html")
+                with open("density_chart.html", "rb") as f:
+                    st.download_button("Download Density Chart", f, file_name="density_chart.html")
+            if volume_profile_fig:
+                volume_profile_fig.write_html("volume_profile.html")
+                with open("volume_profile.html", "rb") as f:
+                    st.download_button("Download Volume Profile", f, file_name="volume_profile.html")
+            sr_data = pd.concat([
+                pd.DataFrame({'Type': 'Support', 'Level': support_levels, 'Hit %': support_probs}),
+                pd.DataFrame({'Type': 'Resistance', 'Level': resistance_levels, 'Hit %': resistance_probs})
+            ])
+            st.download_button("Download S/R Data", sr_data.to_csv(index=False), file_name="sr_levels.csv")
+            if df_options is not None and not df_options.empty:
+                st.download_button("Download Options Data", df_options.to_csv(index=False), file_name="options_data.csv")
 
 else:
     st.error("Could not load or process spot data. Check parameters or try again.")
