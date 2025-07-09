@@ -504,7 +504,7 @@ r_rate = st.sidebar.slider("Interest Rate (%)", 0.0, 10.0, 1.6, 0.1) / 100.0
 use_oi_weights = st.sidebar.checkbox("Use OI Weights", value=True)
 ivrv_n_days = st.sidebar.slider("N-day period for IV/RV analysis", 7, 180, 30, 1)
 run_btn = st.sidebar.button("Run Analysis", use_container_width=True, type="primary", disabled=not sel_expiry)
-
+if 'vol_regime_info' not in st.session_state:
     st.session_state.vol_regime_info = {
         "iv_rv_z_score": np.nan, "iv_rv_spread": np.nan, "current_atm_iv": np.nan,
         "current_n_day_rv": np.nan, "dtm_days_for_iv": np.nan, "n_day_for_rv": 30,
