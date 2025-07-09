@@ -287,18 +287,21 @@ if df is not None and len(df) > 10:
         epsilon = epsilon_factor * np.std(final_prices)
         
         metric = VolatilityMetric(sigma, t, T)
-        def get_hit_prob(level_list):
+        def get_hit_prob(level_list, price_grid, u, metric, T, epsilon, geodesic_prices):
             probs = []
-            total_prob = 0
+            total_prob = np.trapz(u, price_grid)
             for level in level_list:
                 mask = (price_grid >= level - epsilon) & (price_grid <= level + epsilon)
                 raw_prob = np.trapz(u[mask], price_grid[mask])
-                volume_element = np.sqrt(max(np.abs(np.linalg.det(metric.metric_matrix([T, level]))), 1e-6))
-                prob = raw_prob * volume_element
+                metric_mat = metric.metric_matrix([T, level])
+                det = max(np.abs(np.linalg.det(metric_mat)), 1e-6)
+                volume_element = np.sqrt(det)
+                geodesic_price = np.interp(T, geodesic_df["Time"], geodesic_df["Price"])
+                geodesic_weight = np.exp(-np.abs(level - geodesic_price) / (2 * epsilon))
+                prob = raw_prob * volume_element * geodesic_weight
                 probs.append(prob)
-                total_prob += prob
-            return [p / (total_prob + 1e-10) for p in probs] if total_prob > 0 else [0] * len(level_list)
-        
+            total_level_prob = sum(probs) + 1e-10
+            return [p / total_level_prob for p in probs] if total_level_prob > 0 else [0] * len(level_list)
         support_probs = get_hit_prob(support_levels)
         resistance_probs = get_hit_prob(resistance_levels)
         
