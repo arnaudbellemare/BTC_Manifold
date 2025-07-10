@@ -640,8 +640,10 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 stochastic_df['Time'] = t_eval
                 combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]], ignore_index=True)
                 
+                # Ensure x-axis covers the full simulation period
+                max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
-                    x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max(times.max(), ttm)+1])),
+                    x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[S_l-5000, S_u+5000])),
                     color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"], range=["blue", "orange"]))
                 )
@@ -663,7 +665,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                         y2='upper_bound:Q'
                     )
                 
-                # Combine layers in the correct order (background to foreground)
+                # Combine layers in the correct order
                 chart = (prob_band + price_line + support_lines + resistance_lines).properties(
                     title="Price Path, Stochastic Mean, and S/R Bounds with Prob Range",
                     height=500
