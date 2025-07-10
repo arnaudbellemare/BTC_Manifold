@@ -551,13 +551,14 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
         S_l = max(forward_price - 2 * forward_price * atm_iv * np.sqrt(ttm), 1e-6)
 
         with st.spinner("Simulating stochastic price paths..."):
+            N = int(ttm * 365)  # Dynamic N based on ttm for daily steps
             S, V, eta = simulate_non_equilibrium(
                 S0=spot_price, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
                 chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u, S_l=S_l, kappa=kappa,
-                rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=252
+                rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N
             )
 
-        t_eval = np.linspace(0, ttm, 252 + 1)
+        t_eval = np.linspace(0, ttm, N + 1)
         stochastic_df = pd.DataFrame({
             "Time": t_eval,
             "Price": np.mean(S, axis=0),
@@ -640,10 +641,9 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 stochastic_df['Time'] = t_eval
                 combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]], ignore_index=True)
                 
-                # Ensure x-axis covers the full simulation period
-                max_time = max(times.max() if len(times) > 0 else 0, ttm)
+                # Force x-axis to cover the full ttm
                 base = alt.Chart(combined_df).encode(
-                    x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
+                    x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, ttm + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[S_l-5000, S_u+5000])),
                     color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"], range=["blue", "orange"]))
                 )
