@@ -67,7 +67,8 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         price_bound_term = (2 * S_t / S_u - S_l / S_u - 1)**2 / (1 - (2 * S_t / S_u - S_l / S_u - 1)**2 + 1e-6)
         exp_bound = 1 - np.exp(-price_bound_term)
 
-        lambda_eff = lambda_ * exp_eta if np.abs(eta_t) <= eta_star else lambda_ * 0.1 * exp_eta
+        # Element-wise conditional for lambda_eff
+        lambda_eff = np.where(np.abs(eta_t) <= eta_star, lambda_ * exp_eta, lambda_ * 0.1 * exp_eta)
         dS = mu * (1 - alpha * eta_ratio) * S_t * dt + np.sqrt(V_t) * S_t * dW_correlated[:, 0]
         dV = phi * (V0 * exp_eta - V_t) * dt + epsilon * exp_eta * np.sqrt(V_t) * dW_correlated[:, 1]
         d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
