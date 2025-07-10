@@ -547,14 +547,14 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
         atm_iv = df_options.iloc[(df_options['strike'] - forward_price).abs().argsort()[:1]]['iv'].iloc[0]
         if pd.isna(atm_iv) or atm_iv <= 0:
             atm_iv = np.sqrt(V0)
-        S_u = forward_price + 2 * forward_price * atm_iv * np.sqrt(ttm)
-        S_l = max(forward_price - 2 * forward_price * atm_iv * np.sqrt(ttm), 1e-6)
+        S_u_orig = forward_price + 2 * forward_price * atm_iv * np.sqrt(ttm)
+        S_l_orig = max(forward_price - 2 * forward_price * atm_iv * np.sqrt(ttm), 1e-6)
 
         with st.spinner("Simulating stochastic price paths..."):
             N = int(ttm * 365)  # Daily steps based on ttm
             S, V, eta = simulate_non_equilibrium(
                 S0=spot_price, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
-                chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u, S_l=S_l, kappa=kappa,
+                chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig, S_l=S_l_orig, kappa=kappa,
                 rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N
             )
 
@@ -567,9 +567,10 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             "Path": "Stochastic Mean"
         })
 
-        # Derive S_l and S_u from simulated path clusters
+        # Derive cluster-based S_l and S_u
         final_prices = S[:, -1]
         final_prices = final_prices[np.isfinite(final_prices)]  # Clean inf/NaN
+        cluster_levels = []
         if len(final_prices) > 10:  # Ensure enough data for clustering
             X = final_prices.reshape(-1, 1)
             db = DBSCAN(eps=spot_price * 0.05, min_samples=5).fit(X)  # 5% of spot price as epsilon
@@ -579,21 +580,20 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 cluster_centers = [np.mean(final_prices[labels == label]) for label in unique_labels]
                 if len(cluster_centers) >= 2:
                     cluster_centers.sort()
-                    S_l_sim = cluster_centers[0]  # Lowest cluster as support
-                    S_u_sim = cluster_centers[-1]  # Highest cluster as resistance
+                    # Take lowest, a few intermediates, and highest (up to 4 levels)
+                    n_levels = min(4, len(cluster_centers))
+                    indices = np.linspace(0, len(cluster_centers) - 1, n_levels, dtype=int)
+                    cluster_levels = [cluster_centers[i] for i in indices]
                 else:
-                    S_l_sim = np.percentile(final_prices, 2.5)  # 2.5th percentile as fallback
-                    S_u_sim = np.percentile(final_prices, 97.5)  # 97.5th percentile as fallback
+                    cluster_levels = [np.percentile(final_prices, 2.5), np.percentile(final_prices, 97.5)]
             else:
-                S_l_sim = np.percentile(final_prices, 2.5)
-                S_u_sim = np.percentile(final_prices, 97.5)
+                cluster_levels = [np.percentile(final_prices, 2.5), np.percentile(final_prices, 97.5)]
         else:
-            S_l_sim = S_l  # Fall back to original if not enough data
-            S_u_sim = S_u
+            cluster_levels = [S_l_orig, S_u_orig]
 
-        # Update S_l and S_u with simulation-based values
-        S_l = S_l_sim
-        S_u = S_u_sim
+        # Assign cluster-based S_l and S_u (lowest and highest for chart compatibility)
+        S_l = cluster_levels[0]
+        S_u = cluster_levels[-1]
 
         with st.spinner("Calibrating SVI model..."):
             market_strikes = df_options['strike'].values
@@ -675,16 +675,25 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
                     x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
-                    y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[S_l-5000, S_u+5000])),
+                    y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-5000, max(S_u_orig, S_u)+5000])),
                     color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"], range=["blue", "orange"]))
                 )
                 price_line = base.mark_line(strokeWidth=2, interpolate='linear').encode(detail='Path:N')
                 stochastic_line = base.transform_filter(alt.datum.Path == "Stochastic Mean").mark_line(strokeWidth=2, interpolate='linear', opacity=0.8)
                 
-                support_df = pd.DataFrame({"Price": [S_l]})
-                resistance_df = pd.DataFrame({"Price": [S_u]})
-                support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
-                resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
+                # Original S_l and S_u as dashed gray lines
+                orig_support_df = pd.DataFrame({"Price": [S_l_orig]})
+                orig_resistance_df = pd.DataFrame({"Price": [S_u_orig]})
+                orig_support_lines = alt.Chart(orig_support_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q", tooltip=["Price:N"])
+                orig_resistance_lines = alt.Chart(orig_resistance_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q", tooltip=["Price:N"])
+                
+                # Cluster-based levels (green for support, red for resistance)
+                support_levels = [level for level in cluster_levels if level <= (S_l + S_u) / 2]
+                resistance_levels = [level for level in cluster_levels if level > (S_l + S_u) / 2]
+                support_df = pd.DataFrame({"Price": support_levels})
+                resistance_df = pd.DataFrame({"Price": resistance_levels})
+                support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q", tooltip=["Price:N"])
+                resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q", tooltip=["Price:N"])
                 
                 if pd.notna(lower_prob_range) and pd.notna(upper_prob_range):
                     prob_range_df = pd.DataFrame({
@@ -697,7 +706,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                         y2='upper_bound:Q'
                     )
                 
-                chart = (prob_band + price_line + stochastic_line + support_lines + resistance_lines).properties(
+                chart = (prob_band + price_line + stochastic_line + orig_support_lines + orig_resistance_lines + support_lines + resistance_lines).properties(
                     title="Price Path, Stochastic Mean, and S/R Bounds with Prob Range",
                     height=500
                 ).interactive()
@@ -731,7 +740,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     support_data = pd.DataFrame({'Level': support_levels, 'Hit %': support_probs})
                     st.dataframe(support_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
 
-                with col2:
+                with sub_col2:
                     st.markdown("**Resistance Levels**")
                     resistance_data = pd.DataFrame({'Level': resistance_levels, 'Hit %': resistance_probs})
                     st.dataframe(resistance_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
