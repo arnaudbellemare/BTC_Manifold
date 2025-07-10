@@ -405,23 +405,11 @@ def get_pdf_from_svi_prices(K_grid_dense, call_prices_svi, r_rate, T_expiry):
         pdf_values /= integral_pdf
     return pd.DataFrame({'strike': K_grid_dense, 'pdf': pdf_values})
 
-def calculate_probability_range(final_prices, confidence_level):
-    if len(final_prices) < 2:
-        return np.nan, np.nan
-    tail_prob = (1.0 - confidence_level) / 2.0
-    lower = np.percentile(final_prices, 100 * tail_prob)
-    upper = np.percentile(final_prices, 100 * (1 - tail_prob))
-    return lower, upper
-
-def create_interactive_density_chart(price_grid, density, s_levels, r_levels, epsilon, forward_price, prob_range=None, confidence_level=None):
+def create_interactive_density_chart(price_grid, density, s_levels, r_levels, epsilon, forward_price):
     if len(price_grid) == 0 or len(density) == 0:
         st.error("Density chart data is empty.")
         return None
     fig = go.Figure()
-    if prob_range and confidence_level is not None and pd.notna(prob_range[0]) and pd.notna(prob_range[1]):
-        lower, upper = prob_range
-        fig.add_vrect(x0=lower, x1=upper, fillcolor="rgba(255, 255, 0, 0.2)", layer="below", line_width=0,
-                      annotation_text=f"{confidence_level:.0%} Prob. Range", annotation_position="top left")
     fig.add_trace(go.Scatter(x=price_grid, y=density, mode='lines', name='Probability Density',
                             fill='tozeroy', line_color='lightblue', hovertemplate='Price: $%{x:,.2f}<br>Density: %{y:.4f}'))
     for level in s_levels:
@@ -525,7 +513,6 @@ def calculate_curvature(S, dt):
 st.sidebar.header("Model Parameters")
 days_history = st.sidebar.slider("Historical Data (Days)", 7, 180, 90, help="Number of days of historical data to fetch from Kraken.")
 epsilon_factor = st.sidebar.slider("S/R Zone Width Factor", 0.1, 2.0, 0.5, step=0.05, help="Factor to determine width of support/resistance zones.")
-st.session_state['profitability_threshold'] = st.sidebar.slider("Profitability Confidence Interval (%)", 68, 99, 68, step=1, help="Confidence level for probability ranges.") / 100.0
 liquidity_lambda = st.sidebar.slider("Liquidity Scale (λ)", 100, 1000, 500, help="Liquidity parameter for Farmer's term in simulation.")  # New for Farmer's term
 advanced_validation = st.sidebar.checkbox("Enable Advanced Validation (Benford's Law)", value=False, help="Check simulation realism using Benford's Law.")
 gauge_invariance_check = st.sidebar.checkbox("Enable Gauge Invariance Check", value=False, help="Verify model robustness under rescaling.")
@@ -736,7 +723,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 svi_params, svi_error = calibrate_raw_svi(market_ivs, market_strikes, forward_price, ttm, weights=weights)
 
         if svi_params:
-            price_grid = np.linspace(max(1, forward_price * 0.3), forward_price * 2.0, 300)
+            price_grid = np.linspace(max(1, forward_price * 0.3), forward_price * 2.0, 1000)  # Increased to 1000 for better accuracy
             log_moneyness = np.log(np.maximum(price_grid, 1e-6) / forward_price)
             svi_total_var = raw_svi_total_variance(log_moneyness, svi_params)
             svi_ivs = np.sqrt(np.maximum(svi_total_var, 1e-9) / ttm)
@@ -794,9 +781,6 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             support_levels = levels[levels <= median_of_peaks][:2]
             resistance_levels = levels[levels > median_of_peaks][-2:]
 
-            confidence_level = st.session_state.get('profitability_threshold', 0.68)
-            lower_prob_range, upper_prob_range = calculate_probability_range(final_prices, confidence_level)
-
             with tab1:
                 st.subheader("Price Path and Stochastic Dynamics")
                 if len(times) != len(prices):
@@ -823,32 +807,15 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 historical_line = base.transform_filter(alt.datum.Path == "Historical Price").mark_line(strokeWidth=3)
                 stochastic_line = base.transform_filter(alt.datum.Path == "Stochastic Mean").mark_line(strokeWidth=2)
                 simulated_lines = base.transform_filter(alt.datum.Path == "Simulated Path").mark_line(strokeWidth=1)
-                orig_support_df = pd.DataFrame({"Price": [S_l_orig]})
-                orig_resistance_df = pd.DataFrame({"Price": [S_u_orig]})
-                orig_support_lines = alt.Chart(orig_support_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
-                orig_resistance_lines = alt.Chart(orig_resistance_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
                 support_levels_list = [level for level in cluster_levels if level <= (S_l + S_u) / 2]
                 resistance_levels_list = [level for level in cluster_levels if level > (S_l + S_u) / 2]
                 support_df = pd.DataFrame({"Price": support_levels_list})
                 resistance_df = pd.DataFrame({"Price": resistance_levels_list})
                 support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
                 resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
-                chart_layers = [historical_line, stochastic_line, simulated_lines, orig_support_lines, orig_resistance_lines, support_lines, resistance_lines]
-                if pd.notna(lower_prob_range) and pd.notna(upper_prob_range):
-                    prob_range_df = pd.DataFrame({
-                        'lower_bound': [lower_prob_range],
-                        'upper_bound': [upper_prob_range],
-                        'label': [f"{confidence_level:.0%} Range"]
-                    })
-                    prob_band = alt.Chart(prob_range_df).mark_rect(opacity=0.1, color='yellow').encode(
-                        y='lower_bound:Q',
-                        y2='upper_bound:Q'
-                    )
-                    chart_layers.append(prob_band)
-                else:
-                    st.warning("Probability range not available due to invalid KDE output.")
+                chart_layers = [historical_line, stochastic_line, simulated_lines, support_lines, resistance_lines]
                 chart = alt.layer(*chart_layers).properties(
-                    title="Price Path, Stochastic Mean, and S/R Bounds with Prob Range",
+                    title="Price Path, Stochastic Mean, and S/R Bounds",
                     height=500
                 ).interactive()
                 st.altair_chart(chart, use_container_width=True)
@@ -906,17 +873,9 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 curvature = calculate_curvature(S, simulation_T / N)
                 st.metric("Average Curvature (R)", f"{curvature:.4f}")
 
-                st.subheader("Options-Implied Probability Range")
-                if pd.notna(lower_prob_range) and pd.notna(upper_prob_range):
-                    range_cols = st.columns(2)
-                    range_cols[0].metric(label=f"Lower Bound ({((1-confidence_level)/2)*100:.1f}th percentile)", value=f"${lower_prob_range:,.2f}")
-                    range_cols[1].metric(label=f"Upper Bound ({(1-((1-confidence_level)/2))*100:.1f}th percentile)", value=f"${upper_prob_range:,.2f}")
-                else:
-                    st.warning("Could not calculate probability range.")
-
                 st.subheader("S/R Probabilities (SVI-Based)")
-                support_probs = [np.trapz(u[(price_grid >= l - epsilon) & (price_grid <= l + epsilon)], price_grid[(price_grid >= l - epsilon) & (price_grid <= l + epsilon)]) for l in support_levels]
-                resistance_probs = [np.trapz(u[(price_grid >= l - epsilon) & (price_grid <= l + epsilon)], price_grid[(price_grid >= l - epsilon) & (price_grid <= l + epsilon)]) for l in resistance_levels]
+                support_probs = [min(1.0, np.trapz(u[(price_grid >= l - epsilon) & (price_grid <= l + epsilon)], price_grid[(price_grid >= l - epsilon) & (price_grid <= l + epsilon)])) for l in support_levels]
+                resistance_probs = [min(1.0, np.trapz(u[(price_grid >= l - epsilon) & (price_grid <= l + epsilon)], price_grid[(price_grid >= l - epsilon) & (price_grid <= l + epsilon)])) for l in resistance_levels]
                 sub_col1, sub_col2 = st.columns(2)
                 with sub_col1:
                     st.markdown("**Support Levels**")
@@ -930,8 +889,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
 
                 with st.expander("Probability Distribution with S/R Zones", expanded=True):
                     interactive_density_fig = create_interactive_density_chart(
-                        price_grid, u, support_levels, resistance_levels, epsilon, forward_price,
-                        prob_range=(lower_prob_range, upper_prob_range), confidence_level=confidence_level
+                        price_grid, u, support_levels, resistance_levels, epsilon, forward_price
                     )
                     st.plotly_chart(interactive_density_fig, use_container_width=True)
 
