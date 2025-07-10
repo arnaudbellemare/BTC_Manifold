@@ -41,7 +41,7 @@ RSI_BULLISH_THRESHOLD = 65
 RSI_BEARISH_THRESHOLD = 35
 
 # --- Stochastic Dynamics Simulation ---
-def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
+def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=200):
     dt = T / N
     S = np.zeros((n_paths, N+1))
     V = np.zeros((n_paths, N+1))
@@ -83,7 +83,7 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         dV = phi * (V0 * exp_eta - V_t) * dt + epsilon * exp_eta * np.sqrt(np.maximum(V_t, 1e-6)) * dW_correlated[:, 1]
         d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
 
-        S[:, t+1] = np.clip(S_t + dS, 1e-6, 1e6)
+        S[:, t+1] = np.clip(S_t + dS, 1e-6, 1e7)  # Increased upper bound for variability
         V[:, t+1] = np.maximum(V_t + dV, 1e-6)
         eta[:, t+1] = np.clip(eta_t + d_eta, -1.0, 1.0)
 
@@ -136,8 +136,8 @@ def fetch_kraken_data(symbol, timeframe, start_date, end_date):
     n = len(sim_t)
     vol = np.random.normal(0, 0.02, n)
     vol = 0.01 + 0.005 * np.exp(-np.arange(n)/100) * np.cumsum(vol)
-    sim_prices = 65000 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))
-    logging.warning("Using simulated Kraken data with initial price 65000")
+    sim_prices = 111085 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))  # Updated to match spot price
+    logging.warning("Using simulated Kraken data with initial price 111085")
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'volume': np.random.randint(50, 200, n)})
 
 @st.cache_data(ttl=300)
@@ -164,7 +164,7 @@ def get_thalex_instruments():
 
 def simulate_instruments():
     return [
-        {"instrument_name": f"BTC-{d}-65000-C", "type": "option"} for d in ["31DEC25", "31MAR26"]
+        {"instrument_name": f"BTC-{d}-111000-C", "type": "option"} for d in ["31DEC25", "31MAR26"]
     ]
 
 @st.cache_data(ttl=300)
@@ -215,7 +215,7 @@ def get_thalex_ticker(instrument_name: str):
         return None
 
 def simulate_options_data(coin: str) -> pd.DataFrame:
-    strikes = np.linspace(55000, 75000, 20)
+    strikes = np.linspace(90000, 130000, 20)  # Adjusted to center around spot price
     types = ['C', 'P']
     sim_data = []
     for s in strikes:
@@ -352,7 +352,7 @@ def calibrate_raw_svi(market_ivs, market_strikes, F, T, initial_params_dict=None
               initial_params_dict['m'], initial_params_dict['sigma']]
     else:
         atm_total_var_approx = np.interp(0, market_ks, market_ivs**2 * T, left=(market_ivs[0]**2*T), right=(market_ivs[-1]**2*T))
-        p0 = [atm_total_var_approx * 0.9, 0.1, -0.4, 0.0, 0.2]
+        p0 = [atm_total_var_approx * 0.9, 0.15, -0.4, 0.0, 0.2]  # Adjusted b for higher volatility
     bounds = [(None, None), (1e-5, 2.0/T if T > 0 else 20.0), (-0.999, 0.999), (-2.0, 2.0), (1e-4, 3.0)]
     result = minimize(svi_objective_function, p0, args=(market_ivs, market_ks, T, F, weights),
                      method='L-BFGS-B', bounds=bounds, options={'ftol': 1e-8, 'gtol': 1e-6, 'maxiter': 500})
@@ -494,25 +494,25 @@ if df is not None and len(df) > 10:
     times = (times_pd - times_pd.iloc[0]).dt.total_seconds() / (24 * 3600)
     T = times.iloc[-1] if not times.empty else 1.0
     returns = 100 * df['close'].pct_change().dropna()
-    current_price = df['close'].iloc[-1] if not df['close'].empty else 65000
+    current_price = df['close'].iloc[-1] if not df['close'].empty else 111085  # Updated to match spot price
     log_returns = np.log(df['close'] / df['close'].shift(1)).dropna()
-    mu = log_returns.mean() * 365 if not log_returns.empty else 0.05
+    mu = log_returns.mean() * 365 if not log_returns.empty else 0.1  # Increased for variability
     try:
         model = arch_model(returns, vol='Garch', p=1, q=1).fit(disp='off', show_warning=False)
         V0 = (model.conditional_volatility[-1] / 100) ** 2 if model.convergence_flag == 0 else 0.04
         phi = 1 - (model.params['alpha[1]'] + model.params['beta[1]']) if model.convergence_flag == 0 else 1.0
         sigma = model.conditional_volatility / 100
-        epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.1
+        epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.15  # Increased for variability
         logging.info(f"GARCH fit successful - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
     except Exception as e:
         V0 = (returns.std() / 100) ** 2 if not returns.empty else 0.04
         phi = 1.0
-        epsilon = 0.1
+        epsilon = 0.15  # Increased for variability
         sigma = np.full_like(returns, returns.std() / 100 if not returns.empty else 0.02)
         logging.warning(f"GARCH fit failed: {e}. Using fallback - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
     lambda_ = np.log(2) / 1.0
-    chi = 0.01
-    alpha = 0.5
+    chi = 0.02  # Increased for variability
+    alpha = 0.7  # Increased for stronger mispricing impact
     eta_star = 0.09
     kappa = 0.1
     if len(sigma) > len(log_returns):
@@ -527,11 +527,11 @@ if df is not None and len(df) > 10:
 st.sidebar.header("Stochastic Dynamics Parameters (Override)")
 override_params = st.sidebar.checkbox("Manually Override Parameters", value=False)
 if override_params:
-    mu = st.sidebar.slider("Price Drift (μ)", 0.0, 0.2, mu, step=0.01)
+    mu = st.sidebar.slider("Price Drift (μ)", 0.0, 0.3, mu, step=0.01)  # Wider range
     phi = st.sidebar.slider("Volatility Mean Reversion (φ)", 0.1, 2.0, phi, step=0.1)
-    epsilon = st.sidebar.slider("Volatility of Volatility (ε)", 0.01, 0.2, epsilon, step=0.01)
+    epsilon = st.sidebar.slider("Volatility of Volatility (ε)", 0.01, 0.3, epsilon, step=0.01)  # Wider range
     lambda_ = st.sidebar.slider("Arbitrage Mean Reversion (λ)", 0.1, 2.0, lambda_, step=0.1)
-    chi = st.sidebar.slider("Arbitrage Volatility (χ)", 0.005, 0.05, chi, step=0.005)
+    chi = st.sidebar.slider("Arbitrage Volatility (χ)", 0.005, 0.1, chi, step=0.005)  # Wider range
     alpha = st.sidebar.slider("Mispricing Impact (α)", 0.1, 1.0, alpha, step=0.1)
     eta_star = st.sidebar.slider("Mispricing Threshold (η*)", 0.01, 0.2, eta_star, step=0.01)
     kappa = st.sidebar.slider("Arbitrage Revival (κ)", 0.01, 0.5, kappa, step=0.01)
@@ -559,7 +559,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
         )
         ttm = max((expiry_dt - datetime.now(timezone.utc)).total_seconds() / (365.25 * 24 * 3600), 1e-9)
         perp_ticker = get_thalex_ticker(f"{coin}-PERPETUAL")
-        spot_price = float(perp_ticker['mark_price']) if perp_ticker and perp_ticker.get('mark_price') else current_price
+        spot_price = float(perp_ticker['mark_price']) if perp_ticker and perp_ticker.get('mark_price') else 111085
         forward_price = spot_price * np.exp(r_rate * ttm)
         atm_iv = df_options.iloc[(df_options['strike'] - forward_price).abs().argsort()[:1]]['iv'].iloc[0]
         if pd.isna(atm_iv) or atm_iv <= 0:
@@ -647,7 +647,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 st.warning("Insufficient valid final prices for KDE. Using normal distribution fallback.")
                 logging.warning(f"Final prices count: {len(final_prices)}. Using normal fallback.")
                 mean_price = spot_price * np.exp(mu * ttm)
-                std_price = spot_price * np.sqrt(V0) * np.sqrt(ttm)
+                std_price = spot_price * np.sqrt(V0) * np.sqrt(ttm) * 1.5  # Increased spread
                 final_prices = np.random.normal(mean_price, std_price, 1000)
                 final_prices = final_prices[final_prices > 0]
             u = np.zeros_like(price_grid)
@@ -705,7 +705,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
                     x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
-                    y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-5000, max(S_u_orig, S_u)+5000])),
+                    y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
                     color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"], range=["blue", "orange"]))
                 )
                 price_line = base.mark_line(strokeWidth=2, interpolate='linear').encode(detail='Path:N')
