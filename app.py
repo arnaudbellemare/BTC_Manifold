@@ -108,6 +108,7 @@ def fetch_kraken_data(symbol, timeframe, start_date, end_date):
     timeframe_seconds = 3600
     all_ohlcv = []
     max_retries = 5
+    
     progress_bar = st.progress(0)
     while since < int(end_date.timestamp() * 1000):
         for attempt in range(max_retries):
@@ -127,6 +128,7 @@ def fetch_kraken_data(symbol, timeframe, start_date, end_date):
                     logging.error(f"Kraken fetch failed: {e}")
                     break
                 time.sleep(2 ** (attempt + 2))
+    
     progress_bar.empty()
     if all_ohlcv:
         df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -135,6 +137,7 @@ def fetch_kraken_data(symbol, timeframe, start_date, end_date):
         if len(df) >= 10:
             logging.info(f"Kraken data fetched: {len(df)} records")
             return df
+    
     st.error("Failed to fetch Kraken data. Using simulated data.")
     sim_t = pd.date_range(start=start_date, end=end_date, freq='h')
     n = len(sim_t)
@@ -476,18 +479,18 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, 
         xaxis_title="Volume Traded",
         yaxis_title="Price (USD)",
         template="plotly_white",
-        height=400
+        height=600  # Increased height
     )
     return fig, poc
 
-def create_simulated_paths_chart(t_eval, S, stochastic_mean):
+def create_simulated_paths_chart(t_eval_days, S, stochastic_mean):
     fig = go.Figure()
     for i in range(S.shape[0]):
-        fig.add_trace(go.Scatter(x=t_eval, y=S[i, :], mode='lines', line=dict(color='gray', width=1), showlegend=False))
-    fig.add_trace(go.Scatter(x=t_eval, y=stochastic_mean, mode='lines', line=dict(color='orange', width=2), name='Stochastic Mean'))
+        fig.add_trace(go.Scatter(x=t_eval_days, y=S[i, :], mode='lines', line=dict(color='gray', width=1), showlegend=False))
+    fig.add_trace(go.Scatter(x=t_eval_days, y=stochastic_mean, mode='lines', line=dict(color='orange', width=2), name='Stochastic Mean'))
     fig.update_layout(
         title="Simulated Paths (Separate View)",
-        xaxis_title="Time (years)",
+        xaxis_title="Time (days)",
         yaxis_title="Price (USD)",
         template="plotly_white",
         height=400
@@ -613,6 +616,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             )
 
         t_eval = np.linspace(0, ttm, N + 1)
+        t_eval_days = t_eval * 365.25  # Scale to days for plotting
         stochastic_df = pd.DataFrame({
             "Time": t_eval,
             "Price": np.mean(S, axis=0),
@@ -756,7 +760,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
 
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
-                    x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
+                    x=alt.X("Time:Q", title="Time (years)", scale=alt.Scale(domain=[0, max_time + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
                     color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean", "Simulated Path"], range=["#0000FF", "#FFA500", "#D3D3D3"])),
                     detail="ID:N"
@@ -796,13 +800,13 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
 
                 # Separate chart for simulated paths
                 st.subheader("Simulated Paths (Separate View)")
-                simulated_fig = create_simulated_paths_chart(t_eval, S, stochastic_df['Price'].values)
+                simulated_fig = create_simulated_paths_chart(t_eval_days, S, stochastic_df['Price'].values)
                 st.plotly_chart(simulated_fig, use_container_width=True)
 
             with col2:
                 st.subheader("Arbitrage Return Dynamics")
                 eta_chart = alt.Chart(stochastic_df).mark_line(strokeWidth=2).encode(
-                    x=alt.X("Time:Q", title="Time (days)"),
+                    x=alt.X("Time:Q", title="Time (years)"),
                     y=alt.Y("Arbitrage Return:Q", title="η"),
                     color=alt.value("purple")
                 )
