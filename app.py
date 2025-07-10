@@ -261,9 +261,9 @@ def get_expiries_from_instruments(instruments: List[Dict], coin: str) -> List[st
 class BlackScholes:
     def __init__(self, time_to_maturity, strike, underlying_price, volatility, interest_rate):
         self.T = max(float(time_to_maturity), 1e-9)
-        self.K = max(float(strike), 1e-9)
-        self.S = max(float(underlying_price), 1e-9)
-        self.sigma = max(float(volatility), 1e-9)
+        self.K = max(float(strike), 1e-6)
+        self.S = max(float(underlying_price), 1e-6)
+        self.sigma = max(float(volatility), 1e-6)
         self.r = float(interest_rate)
         self.sigma_sqrt_T = self.sigma * np.sqrt(self.T)
         if self.sigma_sqrt_T < 1e-9:
@@ -486,6 +486,53 @@ days_history = st.sidebar.slider("Historical Data (Days)", 7, 180, 90)
 epsilon_factor = st.sidebar.slider("S/R Zone Width Factor", 0.1, 2.0, 0.5, step=0.05)
 st.session_state['profitability_threshold'] = st.sidebar.slider("Profitability Confidence Interval (%)", 68, 99, 68, step=1) / 100.0
 
+# Calibrate stochastic parameters
+end_date = pd.Timestamp.now(tz='UTC')
+start_date = end_date - pd.Timedelta(days=days_history)
+with st.spinner("Fetching Kraken BTC/USD data..."):
+    df = fetch_kraken_data('BTC/USD', '1h', start_date, end_date)
+
+if df is not None and len(df) > 10:
+    prices = df['close'].values
+    times_pd = df['datetime']
+    times = (times_pd - times_pd.iloc[0]).dt.total_seconds() / (24 * 3600)
+    T = times.iloc[-1] if not times.empty else 1.0
+    returns = 100 * df['close'].pct_change().dropna()
+    current_price = df['close'].iloc[-1] if not df['close'].empty else 111085
+    log_returns = np.log(df['close'] / df['close'].shift(1)).dropna()
+    mu = log_returns.mean() * 365 if not log_returns.empty else 0.2
+    try:
+        model = arch_model(returns, vol='Garch', p=1, q=1).fit(disp='off', show_warning=False)
+        V0 = (model.conditional_volatility[-1] / 100) ** 2 if model.convergence_flag == 0 else 0.04
+        phi = 1 - (model.params['alpha[1]'] + model.params['beta[1]']) if model.convergence_flag == 0 else 0.5
+        sigma = model.conditional_volatility / 100
+        epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.1
+        logging.info(f"GARCH fit successful - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
+    except Exception as e:
+        V0 = (returns.std() / 100) ** 2 if not returns.empty else 0.04
+        phi = 0.5
+        epsilon = 0.1
+        sigma = np.full_like(returns, returns.std() / 100 if not returns.empty else 0.02)
+        logging.warning(f"GARCH fit failed: {e}. Using fallback - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
+    lambda_ = np.log(2) / 1.0
+    chi = 0.01
+    alpha = 0.6
+    eta_star = 0.09
+    kappa = 0.05
+    if len(sigma) > len(log_returns):
+        sigma = sigma[-len(log_returns):]
+    elif len(sigma) < len(log_returns):
+        sigma = np.pad(sigma, (0, len(log_returns) - len(sigma)), mode='edge')
+    if len(log_returns) > 1 and len(sigma) > 1 and np.all(np.isfinite(log_returns)) and np.all(np.isfinite(sigma)):
+        corr = np.corrcoef(log_returns, sigma)[0, 1]
+        rho_XY = np.clip(corr, -0.99, 0.99) if np.isfinite(corr) else 0.3
+    else:
+        rho_XY = 0.3
+        logging.warning("Invalid log_returns or sigma for correlation. Using rho_XY=0.3")
+    rho_XZ = 0.2
+    rho_YZ = 0.0
+    logging.info(f"Correlation data - log_returns len: {len(log_returns)}, sigma len: {len(sigma)}, rho_XY: {rho_XY:.4f}")
+
 st.sidebar.header("Stochastic Dynamics Parameters (Override)")
 override_params = st.sidebar.checkbox("Manually Override Parameters", value=False)
 if override_params:
@@ -497,9 +544,9 @@ if override_params:
     alpha = st.sidebar.slider("Mispricing Impact (α)", 0.1, 1.0, alpha, step=0.1)
     eta_star = st.sidebar.slider("Mispricing Threshold (η*)", 0.01, 0.2, eta_star, step=0.01)
     kappa = st.sidebar.slider("Arbitrage Revival (κ)", 0.01, 0.3, kappa, step=0.01)
-    rho_XY = st.sidebar.slider("Price-Volatility Correlation (ρ_XY)", -0.5, 0.5, rho_XY, step=0.05)
-    rho_XZ = st.sidebar.slider("Price-Arbitrage Correlation (ρ_XZ)", -0.5, 0.5, rho_XZ, step=0.05)
-    rho_YZ = st.sidebar.slider("Volatility-Arbitrage Correlation (ρ_YZ)", -0.5, 0.5, rho_YZ, step=0.05)
+    rho_XY = st.sidebar.slider("Price-Volatility Correlation (ρ_XY)", -0.99, 0.99, rho_XY, step=0.01)
+    rho_XZ = st.sidebar.slider("Price-Arbitrage Correlation (ρ_XZ)", -0.99, 0.99, rho_XZ, step=0.01)
+    rho_YZ = st.sidebar.slider("Volatility-Arbitrage Correlation (ρ_YZ)", -0.99, 0.99, rho_YZ, step=0.01)
 
 st.sidebar.header("Options Analysis Parameters")
 all_instruments = get_thalex_instruments()
