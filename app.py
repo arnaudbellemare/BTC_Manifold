@@ -759,6 +759,11 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 try:
                     kde = gaussian_kde(final_prices)
                     u = kde(price_grid)
+                    total_integral = np.trapz(u, price_grid)
+                    if total_integral > 0:
+                        u /= total_integral
+                    else:
+                        logging.warning("Total integral of density is zero. Skipping normalization.")
                 except Exception as e:
                     st.error(f"KDE computation failed: {e}. Using uniform density.")
                     logging.error(f"KDE error: {e}")
