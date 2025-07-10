@@ -661,8 +661,9 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     prob_band = alt.Chart(prob_range_df).mark_rect(opacity=0.1, color='yellow').encode(
                         y='lower_bound:Q',
                         y2='upper_bound:Q'
-                    ).properties(layer=["back"])
+                    )
                 
+                # Combine layers in the correct order (background to foreground)
                 chart = (prob_band + price_line + support_lines + resistance_lines).properties(
                     title="Price Path, Stochastic Mean, and S/R Bounds with Prob Range",
                     height=500
@@ -707,7 +708,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                         price_grid, u, support_levels, resistance_levels, epsilon, forward_price,
                         prob_range=(lower_prob_range, upper_prob_range), confidence_level=confidence_level
                     )
-                    st.plotly_chart(interactive_density_chart, use_container_width=True)
+                    st.plotly_chart(interactive_density_fig, use_container_width=True)
 
             st.header("Volume Profile and Options Chain")
             volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon, current_price)
