@@ -483,14 +483,21 @@ if df is not None and len(df) > 10:
         V0 = (returns.std() / 100) ** 2 if not returns.empty else 0.04
         phi = 1.0
         epsilon = 0.2
+        sigma = np.full_like(returns, returns.std() / 100 if not returns.empty else 0.02)  # Fallback
     lambda_ = np.log(2) / 1.0
     chi = 0.1 * epsilon
     alpha = 0.5
     eta_star = 0.09
     kappa = 0.1
-    rho_XY = np.corrcoef(log_returns, sigma[:-1])[0, 1] if len(sigma) > 1 else 0.3
+    # Ensure compatible lengths for correlation
+    if len(sigma) > len(log_returns):
+        sigma = sigma[-len(log_returns):]
+    elif len(sigma) < len(log_returns):
+        sigma = np.pad(sigma, (0, len(log_returns) - len(sigma)), mode='edge')
+    rho_XY = np.corrcoef(log_returns, sigma)[0, 1] if len(log_returns) > 1 and len(sigma) > 1 and not np.isnan(sigma).all() else 0.3
     rho_XZ = 0.2
     rho_YZ = 0.0
+
 
 st.sidebar.header("Stochastic Dynamics Parameters (Override)")
 override_params = st.sidebar.checkbox("Manually Override Parameters", value=False)
