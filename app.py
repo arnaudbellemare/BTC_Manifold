@@ -749,7 +749,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 )
                 historical_line = base.transform_filter(alt.datum.Path == "Historical Price").mark_line(strokeWidth=3)
                 stochastic_line = base.transform_filter(alt.datum.Path == "Stochastic Mean").mark_line(strokeWidth=2)
-                simulated_lines = base.transform_filter(alt.datum.Path == "Simulated Path").mark_line(strokeWidth=1)
+                simulated_lines = base.transform_filter(alt.datum.Path == "Simulated Path").mark_line(strokeWidth=1, opacity=0.5)
                 orig_support_df = pd.DataFrame({"Price": [S_l_orig]})
                 orig_resistance_df = pd.DataFrame({"Price": [S_u_orig]})
                 orig_support_lines = alt.Chart(orig_support_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
