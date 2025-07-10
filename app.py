@@ -140,8 +140,8 @@ def fetch_kraken_data(symbol, timeframe, start_date, end_date):
     n = len(sim_t)
     vol = np.random.normal(0, 0.03, n)
     vol = 0.02 + 0.01 * np.exp(-np.arange(n)/100) * np.cumsum(vol)
-    sim_prices = 111085 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))
-    logging.warning("Using simulated Kraken data with initial price 111085")
+    sim_prices = 111000 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))
+    logging.warning("Using simulated Kraken data with initial price 111000")
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'volume': np.random.randint(50, 200, n)})
 
 @st.cache_data(ttl=300)
@@ -498,7 +498,7 @@ if df is not None and len(df) > 10:
     times = (times_pd - times_pd.iloc[0]).dt.total_seconds() / (24 * 3600)
     T = times.iloc[-1] if not times.empty else 1.0
     returns = 100 * df['close'].pct_change().dropna()
-    current_price = df['close'].iloc[-1] if not df['close'].empty else 111085
+    current_price = df['close'].iloc[-1] if not df['close'].empty else 111000
     log_returns = np.log(df['close'] / df['close'].shift(1)).dropna()
     log_returns = log_returns[np.isfinite(log_returns)]  # Remove NaNs/infinities
     if len(log_returns) < 10:
@@ -582,7 +582,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
         )
         ttm = max((expiry_dt - datetime.now(timezone.utc)).total_seconds() / (365.25 * 24 * 3600), 1e-9)
         perp_ticker = get_thalex_ticker(f"{coin}-PERPETUAL")
-        spot_price = float(perp_ticker['mark_price']) if perp_ticker and perp_ticker.get('mark_price') else 111085
+        spot_price = float(perp_ticker['mark_price']) if perp_ticker and perp_ticker.get('mark_price') else 111000
         forward_price = spot_price * np.exp(r_rate * ttm)
         atm_iv = df_options.iloc[(df_options['strike'] - forward_price).abs().argsort()[:1]]['iv'].iloc[0]
         if pd.isna(atm_iv) or atm_iv <= 0:
@@ -737,13 +737,19 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 sampled_indices = np.random.choice(2000, size=50, replace=False)
                 sampled_paths = S[sampled_indices, :]
                 path_dfs = [pd.DataFrame({"Time": t_eval, "Price": sampled_paths[i], "Path": f"Simulated Path {i+1}"}) for i in range(50)]
-                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]] + path_dfs, ignore_index=True)
+                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']] + path_dfs, ignore_index=True)
 
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
                     x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
-                    color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"] + [f"Simulated Path {i+1}" for i in range(50)], range=["#0000FF", "#FFA500"] + ["#D3D3D3"]*50))
+                    color=alt.condition(
+                        alt.datum.Path == "Historical Price", alt.value("#0000FF"),
+                        alt.condition(
+                            alt.datum.Path == "Stochastic Mean", alt.value("#FFA500"),
+                            alt.value("#D3D3D3")
+                        )
+                    )
                 )
                 historical_line = base.transform_filter(alt.datum.Path == "Historical Price").mark_line(strokeWidth=3).encode(detail='Path:N')
                 stochastic_line = base.transform_filter(alt.datum.Path == "Stochastic Mean").mark_line(strokeWidth=2).encode(detail='Path:N')
