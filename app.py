@@ -435,7 +435,6 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
         height=400
     )
     return fig
-
 def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, n_bins=100):
     if df.empty or 'close' not in df or 'volume' not in df:
         st.error("Volume profile data is invalid or empty.")
@@ -476,10 +475,9 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, 
         xaxis_title="Volume Traded",
         yaxis_title="Price (USD)",
         template="plotly_white",
-        height=400
+        height=600  # Increased height for more vertical space
     )
     return fig, poc
-
 # --- Sidebar Configuration ---
 st.sidebar.header("Model Parameters")
 days_history = st.sidebar.slider("Historical Data (Days)", 7, 180, 90)
