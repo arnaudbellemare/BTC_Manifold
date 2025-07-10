@@ -1,4 +1,4 @@
-where is this ? i just wanted to have the simulated path import streamlit as st
+import streamlit as st
 import ccxt
 import numpy as np
 import pandas as pd
@@ -480,6 +480,20 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, 
     )
     return fig, poc
 
+def create_simulated_paths_chart(t_eval, S, stochastic_mean):
+    fig = go.Figure()
+    for i in range(S.shape[0]):
+        fig.add_trace(go.Scatter(x=t_eval, y=S[i, :], mode='lines', line=dict(color='gray', width=1), showlegend=False))
+    fig.add_trace(go.Scatter(x=t_eval, y=stochastic_mean, mode='lines', line=dict(color='orange', width=2), name='Stochastic Mean'))
+    fig.update_layout(
+        title="Simulated Paths (Separate View)",
+        xaxis_title="Time (years)",
+        yaxis_title="Price (USD)",
+        template="plotly_white",
+        height=400
+    )
+    return fig
+
 # --- Sidebar Configuration ---
 st.sidebar.header("Model Parameters")
 days_history = st.sidebar.slider("Historical Data (Days)", 7, 180, 90)
@@ -749,7 +763,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 )
                 historical_line = base.transform_filter(alt.datum.Path == "Historical Price").mark_line(strokeWidth=3)
                 stochastic_line = base.transform_filter(alt.datum.Path == "Stochastic Mean").mark_line(strokeWidth=2)
-                simulated_lines = base.transform_filter(alt.datum.Path == "Simulated Path").mark_line(strokeWidth=1, opacity=0.5)
+                simulated_lines = base.transform_filter(alt.datum.Path == "Simulated Path").mark_line(strokeWidth=1)
                 orig_support_df = pd.DataFrame({"Price": [S_l_orig]})
                 orig_resistance_df = pd.DataFrame({"Price": [S_u_orig]})
                 orig_support_lines = alt.Chart(orig_support_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
@@ -779,6 +793,11 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     height=500
                 ).interactive()
                 st.altair_chart(chart, use_container_width=True)
+
+                # Separate chart for simulated paths
+                st.subheader("Simulated Paths (Separate View)")
+                simulated_fig = create_simulated_paths_chart(t_eval, S, stochastic_df['Price'].values)
+                st.plotly_chart(simulated_fig, use_container_width=True)
 
             with col2:
                 st.subheader("Arbitrage Return Dynamics")
