@@ -40,7 +40,8 @@ Z_SCORE_LOW_IV_THRESHOLD = -1.0
 RSI_BULLISH_THRESHOLD = 65
 RSI_BEARISH_THRESHOLD = 35
 
-def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
+# --- Stochastic Dynamics Simulation ---
+def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=100):
     dt = T / N
     S = np.zeros((n_paths, N+1))
     V = np.zeros((n_paths, N+1))
@@ -69,7 +70,7 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         eta_ratio = eta_t / eta_star
         exp_eta = np.exp(np.clip(-eta_ratio**2, -700, 0))
 
-        # Price bound term as per text
+        # Price bound term as per text: (2S/S_u - S_l/S_u - 1)^2
         price_bound_term = (2 * S_t / S_u - S_l / S_u - 1)**2
         exp_bound = 1 - np.exp(np.clip(-price_bound_term, -700, 0))
 
@@ -82,12 +83,13 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
 
         # Update with bounds to prevent numerical issues
-        S[:, t+1] = np.clip(S_t + dS, 1e-6, 1e6)  # Cap prices to prevent explosion
-        V[:, t+1] = np.maximum(V_t + dV, 1e-6)   # Ensure positive variance
-        eta[:, t+1] = np.clip(eta_t + d_eta, -1.0, 1.0)  # Limit arbitrage return
+        S[:, t+1] = np.clip(S_t + dS, 1e-6, 1e6)
+        V[:, t+1] = np.maximum(V_t + dV, 1e-6)
+        eta[:, t+1] = np.clip(eta_t + d_eta, -1.0, 1.0)
 
     logging.info(f"Simulation stats - Mean eta: {np.mean(eta):.4f}, Max |eta|: {np.max(np.abs(eta)):.4f}, Non-eq count: {np.sum(np.abs(eta) > eta_star)}")
     return S, V, eta
+
 # --- Helper Functions ---
 @st.cache_data
 def fetch_kraken_data(symbol, timeframe, start_date, end_date):
@@ -560,14 +562,14 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
         S_l_orig = max(forward_price - 2 * forward_price * atm_iv * np.sqrt(ttm), 1e-6)
 
         with st.spinner("Simulating stochastic price paths..."):
-            N = int(ttm * 365)  # Daily steps based on ttm
+            N = int(ttm * 365)
             S, V, eta = simulate_non_equilibrium(
                 S0=spot_price, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
                 chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig, S_l=S_l_orig, kappa=kappa,
                 rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N
             )
 
-        t_eval = np.linspace(0, ttm, N + 1)  # Ensure t_eval matches N
+        t_eval = np.linspace(0, ttm, N + 1)
         stochastic_df = pd.DataFrame({
             "Time": t_eval,
             "Price": np.mean(S, axis=0),
@@ -578,18 +580,17 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
 
         # Derive cluster-based S_l and S_u
         final_prices = S[:, -1]
-        final_prices = final_prices[np.isfinite(final_prices)]  # Clean inf/NaN
+        final_prices = final_prices[np.isfinite(final_prices)]
         cluster_levels = []
-        if len(final_prices) > 10:  # Ensure enough data for clustering
+        if len(final_prices) > 10:
             X = final_prices.reshape(-1, 1)
-            db = DBSCAN(eps=spot_price * 0.05, min_samples=5).fit(X)  # 5% of spot price as epsilon
+            db = DBSCAN(eps=spot_price * 0.05, min_samples=5).fit(X)
             labels = db.labels_
-            unique_labels = set(labels) - {-1}  # Exclude noise points
+            unique_labels = set(labels) - {-1}
             if unique_labels:
                 cluster_centers = [np.mean(final_prices[labels == label]) for label in unique_labels]
                 if len(cluster_centers) >= 2:
                     cluster_centers.sort()
-                    # Take lowest, a few intermediates, and highest (up to 4 levels)
                     n_levels = min(4, len(cluster_centers))
                     indices = np.linspace(0, len(cluster_centers) - 1, n_levels, dtype=int)
                     cluster_levels = [cluster_centers[i] for i in indices]
@@ -599,8 +600,8 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 cluster_levels = [np.percentile(final_prices, 2.5), np.percentile(final_prices, 97.5)]
         else:
             cluster_levels = [S_l_orig, S_u_orig]
+            logging.warning(f"Insufficient final prices for clustering: {len(final_prices)}. Using original S_l, S_u.")
 
-        # Assign cluster-based S_l and S_u (lowest and highest for chart compatibility)
         S_l = cluster_levels[0]
         S_u = cluster_levels[-1]
 
@@ -632,16 +633,30 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             call_prices_svi = np.array([BlackScholes(ttm, K, forward_price, iv, r_rate).calculate_prices()[0]
                                        for K, iv in zip(price_grid, svi_ivs)])
             pdf_df = get_pdf_from_svi_prices(price_grid, call_prices_svi, r_rate, ttm)
-            u = pdf_df['pdf'].values
 
+            # KDE with fallback
             final_prices = S[:, -1]
-            final_prices = final_prices[np.isfinite(final_prices)]  # Remove inf and NaN
-            if len(final_prices) == 0:
-                st.error("No valid final prices for KDE computation.")
-                u = np.zeros_like(price_grid)
+            final_prices = final_prices[np.isfinite(final_prices)]
+            if len(final_prices) < 10:
+                st.warning("Insufficient valid final prices for KDE. Using normal distribution fallback.")
+                logging.warning(f"Final prices count: {len(final_prices)}. Using normal fallback.")
+                mean_price = spot_price * np.exp(mu * ttm)
+                std_price = spot_price * np.sqrt(V0) * np.sqrt(ttm)
+                final_prices = np.random.normal(mean_price, std_price, 1000)
+                final_prices = final_prices[final_prices > 0]
+            u = np.zeros_like(price_grid)
+            if len(final_prices) > 0:
+                try:
+                    kde = gaussian_kde(final_prices)
+                    u = kde(price_grid)
+                except Exception as e:
+                    st.error(f"KDE computation failed: {e}. Using uniform density.")
+                    logging.error(f"KDE error: {e}")
+                    u = np.ones_like(price_grid) / (price_grid[-1] - price_grid[0])
             else:
-                kde = gaussian_kde(final_prices)
-                u = kde(price_grid)
+                st.error("No valid final prices. Using uniform density.")
+                u = np.ones_like(price_grid) / (price_grid[-1] - price_grid[0])
+            logging.info(f"KDE output - Mean density: {np.mean(u):.6f}, Valid prices: {len(final_prices)}")
 
             price_std = forward_price * atm_iv * np.sqrt(ttm)
             epsilon = epsilon_factor * price_std
@@ -676,11 +691,11 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 if len(t_eval) != len(stochastic_df['Price']):
                     st.error(f"Simulation data mismatch: t_eval length ({len(t_eval)}) != stochastic_df Price length ({len(stochastic_df['Price'])})")
                     t_eval = t_eval[:len(stochastic_df['Price'])]
-                
+
                 price_df = pd.DataFrame({"Time": times, "Price": prices, "Path": "Historical Price"})
                 stochastic_df['Time'] = t_eval
                 combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]], ignore_index=True)
-                
+
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
                     x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
@@ -689,21 +704,20 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 )
                 price_line = base.mark_line(strokeWidth=2, interpolate='linear').encode(detail='Path:N')
                 stochastic_line = base.transform_filter(alt.datum.Path == "Stochastic Mean").mark_line(strokeWidth=2, interpolate='linear', opacity=0.8)
-                
-                # Original S_l and S_u as dashed gray lines
+
                 orig_support_df = pd.DataFrame({"Price": [S_l_orig]})
                 orig_resistance_df = pd.DataFrame({"Price": [S_u_orig]})
-                orig_support_lines = alt.Chart(orig_support_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q", tooltip=["Price:N"])
-                orig_resistance_lines = alt.Chart(orig_resistance_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q", tooltip=["Price:N"])
-                
-                # Cluster-based levels (green for support, red for resistance)
+                orig_support_lines = alt.Chart(orig_support_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
+                orig_resistance_lines = alt.Chart(orig_resistance_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
+
                 support_levels = [level for level in cluster_levels if level <= (S_l + S_u) / 2]
                 resistance_levels = [level for level in cluster_levels if level > (S_l + S_u) / 2]
                 support_df = pd.DataFrame({"Price": support_levels})
                 resistance_df = pd.DataFrame({"Price": resistance_levels})
-                support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q", tooltip=["Price:N"])
-                resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q", tooltip=["Price:N"])
-                
+                support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
+                resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
+
+                chart_layers = [price_line, stochastic_line, orig_support_lines, orig_resistance_lines, support_lines, resistance_lines]
                 if pd.notna(lower_prob_range) and pd.notna(upper_prob_range):
                     prob_range_df = pd.DataFrame({
                         'lower_bound': [lower_prob_range],
@@ -714,8 +728,11 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                         y='lower_bound:Q',
                         y2='upper_bound:Q'
                     )
-                
-                chart = (prob_band + price_line + stochastic_line + orig_support_lines + orig_resistance_lines + support_lines + resistance_lines).properties(
+                    chart_layers.append(prob_band)
+                else:
+                    st.warning("Probability range not available due to invalid KDE output.")
+
+                chart = alt.layer(*chart_layers).properties(
                     title="Price Path, Stochastic Mean, and S/R Bounds with Prob Range",
                     height=500
                 ).interactive()
@@ -767,7 +784,5 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 st.plotly_chart(volume_profile_fig, use_container_width=True)
                 st.metric("Point of Control (POC)", f"${poc['price_bin']:,.2f}")
                 st.metric("Current Price", f"${current_price:,.2f}")
-
-            # [Add options chain, IV/RV, RSI, and export sections as needed]
 else:
     st.error("Could not load or process spot data. Check parameters or try again.")
