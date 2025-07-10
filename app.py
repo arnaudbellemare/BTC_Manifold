@@ -63,17 +63,17 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         V_t = V[:, t]
         eta_t = eta[:, t]
         eta_ratio = eta_t / eta_star
-        exp_eta = np.exp(-(eta_ratio**2))
+        exp_eta = np.exp(np.clip(-eta_ratio**2, -700, 0))  # Clip to avoid overflow
         price_bound_term = (2 * S_t / S_u - S_l / S_u - 1)**2 / (1 - (2 * S_t / S_u - S_l / S_u - 1)**2 + 1e-6)
-        exp_bound = 1 - np.exp(-price_bound_term)
+        exp_bound = 1 - np.exp(-np.clip(price_bound_term, 0, 700))  # Clip to avoid overflow
 
         lambda_eff = np.where(np.abs(eta_t) <= eta_star, lambda_ * exp_eta, lambda_ * 0.1 * exp_eta)
-        dS = mu * (1 - alpha * eta_ratio) * S_t * dt + np.sqrt(V_t) * S_t * dW_correlated[:, 0]
-        dV = phi * (V0 * exp_eta - V_t) * dt + epsilon * exp_eta * np.sqrt(V_t) * dW_correlated[:, 1]
+        dS = mu * (1 - alpha * eta_ratio) * S_t * dt + np.sqrt(np.maximum(V_t, 1e-6)) * S_t * dW_correlated[:, 0]  # Prevent sqrt of zero
+        dV = phi * (V0 * exp_eta - V_t) * dt + epsilon * exp_eta * np.sqrt(np.maximum(V_t, 1e-6)) * dW_correlated[:, 1]
         d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
 
-        S[:, t+1] = S_t + dS
-        V[:, t+1] = np.maximum(V_t + dV, 1e-6)
+        S[:, t+1] = np.clip(S_t + dS, 1e-6, np.inf)  # Prevent negative or zero prices
+        V[:, t+1] = np.maximum(V_t + dV, 1e-6)  # Ensure positive variance
         eta[:, t+1] = eta_t + d_eta
 
     logging.info(f"Simulation stats - Mean eta: {np.mean(eta):.4f}, Max |eta|: {np.max(np.abs(eta)):.4f}, Non-eq count: {np.sum(np.abs(eta) > eta_star)}")
@@ -598,10 +598,13 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             u = pdf_df['pdf'].values
 
             final_prices = S[:, -1]
-            kde = gaussian_kde(final_prices)
-            mc_pdf = kde(price_grid)
-            mc_pdf /= np.trapz(mc_pdf, price_grid)
-            pdf_df['mc_pdf'] = mc_pdf
+            final_prices = final_prices[np.isfinite(final_prices)]  # Remove inf and NaN
+            if len(final_prices) == 0:
+                st.error("No valid final prices for KDE computation.")
+                u = np.zeros_like(price_grid)
+            else:
+                kde = gaussian_kde(final_prices)
+                u = kde(price_grid)
 
             price_std = forward_price * atm_iv * np.sqrt(ttm)
             epsilon = epsilon_factor * price_std
