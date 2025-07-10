@@ -67,7 +67,6 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         price_bound_term = (2 * S_t / S_u - S_l / S_u - 1)**2 / (1 - (2 * S_t / S_u - S_l / S_u - 1)**2 + 1e-6)
         exp_bound = 1 - np.exp(-price_bound_term)
 
-        # Element-wise conditional for lambda_eff
         lambda_eff = np.where(np.abs(eta_t) <= eta_star, lambda_ * exp_eta, lambda_ * 0.1 * exp_eta)
         dS = mu * (1 - alpha * eta_ratio) * S_t * dt + np.sqrt(V_t) * S_t * dW_correlated[:, 0]
         dV = phi * (V0 * exp_eta - V_t) * dt + epsilon * exp_eta * np.sqrt(V_t) * dW_correlated[:, 1]
@@ -379,7 +378,7 @@ def calculate_probability_range(price_grid, pdf_values, confidence_level):
     unique_cdf, unique_indices = np.unique(cdf_values, return_index=True)
     unique_prices = price_grid[unique_indices]
     if len(unique_cdf) < 2:
-        return np.nan, nan
+        return np.nan, np.nan
     inverse_cdf = interp1d(unique_cdf, unique_prices, bounds_error=False, fill_value="extrapolate")
     tail_prob = (1.0 - confidence_level) / 2.0
     lower_quantile, upper_quantile = tail_prob, 1.0 - tail_prob
@@ -578,11 +577,12 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 t_eval = t_eval[:len(stochastic_df['Price'])]
             
             price_df = pd.DataFrame({"Time": times, "Price": prices, "Path": "Historical Price"})
+            stochastic_df['Time'] = t_eval
             combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]], ignore_index=True)
             
             base = alt.Chart(combined_df).encode(
-                x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max(times.max(), ttm)])),
-                y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False)),
+                x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max(times.max(), ttm)+1])),
+                y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[S_l-5000, S_u+5000])),
                 color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"], range=["blue", "orange"]))
             )
             price_line = base.mark_line(strokeWidth=2).encode(detail='Path:N')
