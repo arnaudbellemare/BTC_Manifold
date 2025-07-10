@@ -41,14 +41,14 @@ RSI_BULLISH_THRESHOLD = 65
 RSI_BEARISH_THRESHOLD = 35
 
 # --- Stochastic Dynamics Simulation ---
-def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
+def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=200):
     dt = T / N
     S = np.zeros((n_paths, N+1))
     V = np.zeros((n_paths, N+1))
     eta = np.zeros((n_paths, N+1))
-    S[:, 0] = S0
-    V[:, 0] = V0
-    eta[:, 0] = eta0
+    S[:, 0] = max(S0, 1e-6)  # Ensure positive initial price
+    V[:, 0] = max(V0, 1e-6)  # Ensure positive initial variance
+    eta[:, 0] = np.clip(eta0, -0.5, 0.5)  # Limit initial arbitrage return
 
     # Correlation matrix and Cholesky decomposition
     corr_matrix = np.array([[1.0, rho_XY, rho_XZ],
@@ -70,24 +70,32 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         eta_ratio = eta_t / eta_star
         exp_eta = np.exp(np.clip(-eta_ratio**2, -700, 0))
 
-        # Price bound term as per text: (2S/S_u - S_l/S_u - 1)^2
+        # Price bound term as per text
         price_bound_term = (2 * S_t / S_u - S_l / S_u - 1)**2
         exp_bound = 1 - np.exp(np.clip(-price_bound_term, -700, 0))
 
         # Mean reversion rate
         lambda_eff = lambda_ * exp_eta
 
-        # SDEs
-        dS = mu * (1 - alpha * eta_ratio) * S_t * dt + np.sqrt(np.maximum(V_t, 1e-6)) * S_t * dW_correlated[:, 0]
+        # SDEs with bounds on parameters
+        mu_t = np.clip(mu * (1 - alpha * eta_ratio), -0.5, 0.5)  # Limit drift
+        dS = mu_t * S_t * dt + np.sqrt(np.maximum(V_t, 1e-6)) * S_t * dW_correlated[:, 0]
         dV = phi * (V0 * exp_eta - V_t) * dt + epsilon * exp_eta * np.sqrt(np.maximum(V_t, 1e-6)) * dW_correlated[:, 1]
         d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
 
-        # Update with bounds to prevent numerical issues
+        # Update with enhanced bounds
         S[:, t+1] = np.clip(S_t + dS, 1e-6, 1e6)
         V[:, t+1] = np.maximum(V_t + dV, 1e-6)
         eta[:, t+1] = np.clip(eta_t + d_eta, -1.0, 1.0)
 
-    logging.info(f"Simulation stats - Mean eta: {np.mean(eta):.4f}, Max |eta|: {np.max(np.abs(eta)):.4f}, Non-eq count: {np.sum(np.abs(eta) > eta_star)}")
+        # Debug logging every 100 steps
+        if t % 100 == 0:
+            logging.debug(f"Step {t}: S_mean={np.mean(S_t):.2f}, V_mean={np.mean(V_t):.4f}, eta_mean={np.mean(eta_t):.4f}")
+
+    final_prices = S[:, -1]
+    valid_final_prices = final_prices[np.isfinite(final_prices)]
+    logging.info(f"Simulation stats - Mean eta: {np.mean(eta):.4f}, Max |eta|: {np.max(np.abs(eta)):.4f}, "
+                 f"Valid final prices: {len(valid_final_prices)}, Mean S_final: {np.mean(valid_final_prices):.2f}")
     return S, V, eta
 
 # --- Helper Functions ---
@@ -496,16 +504,16 @@ if df is not None and len(df) > 10:
         V0 = (model.conditional_volatility[-1] / 100) ** 2 if model.convergence_flag == 0 else 0.04
         phi = 1 - (model.params['alpha[1]'] + model.params['beta[1]']) if model.convergence_flag == 0 else 1.0
         sigma = model.conditional_volatility / 100
-        epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.2
+        epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.1  # Reduced for stability
         logging.info(f"GARCH fit successful - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
     except Exception as e:
         V0 = (returns.std() / 100) ** 2 if not returns.empty else 0.04
         phi = 1.0
-        epsilon = 0.2
+        epsilon = 0.1  # Reduced for stability
         sigma = np.full_like(returns, returns.std() / 100 if not returns.empty else 0.02)
         logging.warning(f"GARCH fit failed: {e}. Using fallback - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
     lambda_ = np.log(2) / 1.0
-    chi = 0.1 * epsilon
+    chi = 0.01  # Reduced for stability
     alpha = 0.5
     eta_star = 0.09
     kappa = 0.1
@@ -523,9 +531,9 @@ override_params = st.sidebar.checkbox("Manually Override Parameters", value=Fals
 if override_params:
     mu = st.sidebar.slider("Price Drift (μ)", 0.0, 0.2, mu, step=0.01)
     phi = st.sidebar.slider("Volatility Mean Reversion (φ)", 0.1, 2.0, phi, step=0.1)
-    epsilon = st.sidebar.slider("Volatility of Volatility (ε)", 0.05, 0.5, epsilon, step=0.01)
+    epsilon = st.sidebar.slider("Volatility of Volatility (ε)", 0.01, 0.2, epsilon, step=0.01)  # Narrowed range
     lambda_ = st.sidebar.slider("Arbitrage Mean Reversion (λ)", 0.1, 2.0, lambda_, step=0.1)
-    chi = st.sidebar.slider("Arbitrage Volatility (χ)", 0.01, 0.1, chi, step=0.01)
+    chi = st.sidebar.slider("Arbitrage Volatility (χ)", 0.005, 0.05, chi, step=0.005)  # Narrowed range
     alpha = st.sidebar.slider("Mispricing Impact (α)", 0.1, 1.0, alpha, step=0.1)
     eta_star = st.sidebar.slider("Mispricing Threshold (η*)", 0.01, 0.2, eta_star, step=0.01)
     kappa = st.sidebar.slider("Arbitrage Revival (κ)", 0.01, 0.5, kappa, step=0.01)
@@ -562,11 +570,11 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
         S_l_orig = max(forward_price - 2 * forward_price * atm_iv * np.sqrt(ttm), 1e-6)
 
         with st.spinner("Simulating stochastic price paths..."):
-            N = int(ttm * 365)
+            N = max(100, min(int(ttm * 365), 1000))  # Bound steps for stability
             S, V, eta = simulate_non_equilibrium(
                 S0=spot_price, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
                 chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig, S_l=S_l_orig, kappa=kappa,
-                rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N
+                rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=200
             )
 
         t_eval = np.linspace(0, ttm, N + 1)
@@ -634,7 +642,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                                        for K, iv in zip(price_grid, svi_ivs)])
             pdf_df = get_pdf_from_svi_prices(price_grid, call_prices_svi, r_rate, ttm)
 
-            # KDE with fallback
+            # KDE with robust fallback
             final_prices = S[:, -1]
             final_prices = final_prices[np.isfinite(final_prices)]
             if len(final_prices) < 10:
