@@ -405,26 +405,13 @@ def get_pdf_from_svi_prices(K_grid_dense, call_prices_svi, r_rate, T_expiry):
         pdf_values /= integral_pdf
     return pd.DataFrame({'strike': K_grid_dense, 'pdf': pdf_values})
 
-def calculate_probability_range(price_grid, pdf_values, confidence_level):
-    if len(price_grid) != len(pdf_values) or len(price_grid) < 2:
+def calculate_probability_range(final_prices, confidence_level):
+    if len(final_prices) < 2:
         return np.nan, np.nan
-    integral = np.trapz(pdf_values, price_grid)
-    if integral < 1e-6:
-        return np.nan, np.nan
-    normalized_pdf = pdf_values / integral
-    cdf_values = [np.trapz(normalized_pdf[:i+1], price_grid[:i+1]) for i in range(len(price_grid))]
-    cdf_values = np.array(cdf_values)
-    cdf_values[0], cdf_values[-1] = 0.0, 1.0
-    unique_cdf, unique_indices = np.unique(cdf_values, return_index=True)
-    unique_prices = price_grid[unique_indices]
-    if len(unique_cdf) < 2:
-        return np.nan, np.nan
-    inverse_cdf = interp1d(unique_cdf, unique_prices, bounds_error=False, fill_value="extrapolate")
     tail_prob = (1.0 - confidence_level) / 2.0
-    lower_quantile, upper_quantile = tail_prob, 1.0 - tail_prob
-    lower_bound = float(inverse_cdf(lower_quantile))
-    upper_bound = float(inverse_cdf(upper_quantile))
-    return lower_bound, upper_bound
+    lower = np.percentile(final_prices, 100 * tail_prob)
+    upper = np.percentile(final_prices, 100 * (1 - tail_prob))
+    return lower, upper
 
 def create_interactive_density_chart(price_grid, density, s_levels, r_levels, epsilon, forward_price, prob_range=None, confidence_level=None):
     if len(price_grid) == 0 or len(density) == 0:
@@ -803,7 +790,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             resistance_levels = levels[levels > median_of_peaks][-2:]
 
             confidence_level = st.session_state.get('profitability_threshold', 0.68)
-            lower_prob_range, upper_prob_range = calculate_probability_range(price_grid, u, confidence_level)
+            lower_prob_range, upper_prob_range = calculate_probability_range(final_prices, confidence_level)
 
             with tab1:
                 st.subheader("Price Path and Stochastic Dynamics")
