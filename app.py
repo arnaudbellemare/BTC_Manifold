@@ -723,19 +723,15 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 sampled_indices = np.random.choice(2000, size=50, replace=False)
                 sampled_paths = S[sampled_indices, :]
                 path_dfs = [pd.DataFrame({"Time": t_eval, "Price": sampled_paths[i], "Path": f"Simulated Path {i+1}"}) for i in range(50)]
-                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]] + path_dfs, ignore_index=True)
+                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']] + path_dfs], ignore_index=True)
 
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
                     x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
-                    color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"] + [f"Simulated Path {i+1}" for i in range(50)], range=["blue", "orange"] + ["#D3D3D3"]*50)),
-                    opacity=alt.condition(
-                        alt.datum.Path == "Historical Price", alt.value(1.0),
-                        alt.condition(alt.datum.Path == "Stochastic Mean", alt.value(0.8), alt.value(0.05))
-                    )
+                    color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"] + [f"Simulated Path {i+1}" for i in range(50)], range=["#0000FF", "#FFA500"] + ["#D3D3D3"]*50))
                 )
-                price_line = base.mark_line(strokeWidth=2, interpolate='linear').encode(detail='Path:N')
+                price_line = base.mark_line(strokeWidth=alt.condition(alt.datum.Path == "Historical Price", alt.value(3), alt.condition(alt.datum.Path == "Stochastic Mean", alt.value(2), alt.value(1)))).encode(detail='Path:N')
                 orig_support_df = pd.DataFrame({"Price": [S_l_orig]})
                 orig_resistance_df = pd.DataFrame({"Price": [S_u_orig]})
                 orig_support_lines = alt.Chart(orig_support_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
