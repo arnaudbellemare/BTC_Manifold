@@ -41,7 +41,7 @@ RSI_BULLISH_THRESHOLD = 65
 RSI_BEARISH_THRESHOLD = 35
 
 # --- Stochastic Dynamics Simulation ---
-def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=100):
+def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
     dt = T / N
     S = np.zeros((n_paths, N+1))
     V = np.zeros((n_paths, N+1))
@@ -50,6 +50,7 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
     V[:, 0] = V0
     eta[:, 0] = eta0
 
+    # Correlation matrix and Cholesky decomposition
     corr_matrix = np.array([[1.0, rho_XY, rho_XZ],
                             [rho_XY, 1.0, rho_YZ],
                             [rho_XZ, rho_YZ, 1.0]])
@@ -64,11 +65,16 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         eta_t = eta[:, t]
         eta_ratio = eta_t / eta_star
         exp_eta = np.exp(np.clip(-eta_ratio**2, -700, 0))  # Clip to avoid overflow
-        price_bound_term = (2 * S_t / S_u - S_l / S_u - 1)**2 / (1 - (2 * S_t / S_u - S_l / S_u - 1)**2 + 1e-6)
-        exp_bound = 1 - np.exp(-np.clip(price_bound_term, 0, 700))  # Clip to avoid overflow
 
-        lambda_eff = np.where(np.abs(eta_t) <= eta_star, lambda_ * exp_eta, lambda_ * 0.1 * exp_eta)
-        dS = mu * (1 - alpha * eta_ratio) * S_t * dt + np.sqrt(np.maximum(V_t, 1e-6)) * S_t * dW_correlated[:, 0]  # Prevent sqrt of zero
+        # Compute the price bound term as per the text: (2S/S_u - S_l/S_u - 1)^2
+        price_bound_term = (2 * S_t / S_u - S_l / S_u - 1)**2
+        exp_bound = 1 - np.exp(np.clip(-price_bound_term, -700, 0))  # 1 - e^(-term)
+
+        # Mean reversion rate: lambda * e^(-(\eta/\eta_star)^2) for all \eta
+        lambda_eff = lambda_ * exp_eta  # No 0.1 factor for |\eta| > \eta_star
+
+        # SDEs as per the text
+        dS = mu * (1 - alpha * eta_ratio) * S_t * dt + np.sqrt(np.maximum(V_t, 1e-6)) * S_t * dW_correlated[:, 0]
         dV = phi * (V0 * exp_eta - V_t) * dt + epsilon * exp_eta * np.sqrt(np.maximum(V_t, 1e-6)) * dW_correlated[:, 1]
         d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
 
