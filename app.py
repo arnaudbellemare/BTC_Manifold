@@ -50,12 +50,17 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
     V[:, 0] = max(V0, 1e-6)
     eta[:, 0] = np.clip(eta0, -0.5, 0.5)
 
-    # Validate correlation matrix
+    # Validate correlation coefficients
+    rho_XY = np.clip(rho_XY, -0.99, 0.99) if np.isfinite(rho_XY) else 0.3
+    rho_XZ = np.clip(rho_XZ, -0.99, 0.99) if np.isfinite(rho_XZ) else 0.2
+    rho_YZ = np.clip(rho_YZ, -0.99, 0.99) if np.isfinite(rho_YZ) else 0.0
+
+    # Construct and validate correlation matrix
     corr_matrix = np.array([[1.0, rho_XY, rho_XZ],
                             [rho_XY, 1.0, rho_YZ],
                             [rho_XZ, rho_YZ, 1.0]])
-    if not np.all(np.linalg.eigvals(corr_matrix) > 0):
-        logging.warning("Correlation matrix not positive definite. Using identity matrix.")
+    if not np.all(np.isfinite(corr_matrix)) or not np.all(np.linalg.eigvals(corr_matrix) > 0):
+        logging.warning("Correlation matrix invalid or not positive definite. Using identity matrix.")
         corr_matrix = np.eye(3)
     L = np.linalg.cholesky(corr_matrix)
 
@@ -518,10 +523,67 @@ if df is not None and len(df) > 10:
         sigma = sigma[-len(log_returns):]
     elif len(sigma) < len(log_returns):
         sigma = np.pad(sigma, (0, len(log_returns) - len(sigma)), mode='edge')
-    rho_XY = np.corrcoef(log_returns, sigma)[0, 1] if len(log_returns) > 1 and len(sigma) > 1 and not np.isnan(sigma).all() else 0.3
-    logging.info(f"Correlation data - log_returns len: {len(log_returns)}, sigma len: {len(sigma)}, rho_XY: {rho_XY:.4f}")
+    # Robust correlation calibration
+    if len(log_returns) > 1 and len(sigma) > 1 and np.all(np.isfinite(log_returns)) and np.all(np.isfinite(sigma)):
+        corr = np.corrcoef(log_returns, sigma)[0, 1]
+        rho_XY = np.clip(corr, -0.99, 0.99) if np.isfinite(corr) else 0.3
+    else:
+        rho_XY = 0.3
+        logging.warning("Invalid log_returns or sigma for correlation. Using rho_XY=0.3")
     rho_XZ = 0.2
     rho_YZ = 0.0
+    logging.info(f"Correlation data - log_returns len: {len(log_returns)}, sigma len: {len(sigma)}, rho_XY: {rho_XY:.4f}")
+
+st.sidebar.header("Stochastic Dynamics Parameters (Override)")
+override_params = st.sidebar.checkbox("Manually Override Parameters", value=False)
+if override_params:
+    mu = st.sidebar.slider("Price Drift (μ)", 0.0, 0.3, mu, step=0.01)
+    phi = st.sidebar.slider("Volatility Mean Reversion (φ)", 0.1, 2.0, phi, step=0.1)
+    epsilon = st.sidebar.slider("Volatility of Volatility (ε)", 0.01, 0.2, epsilon, step=0.01)
+    lambda_ = st.sidebar.slider("Arbitrage Mean Reversion (λ)", 0.1, 2.0, lambda_, step=0.1)
+    chi = st.sidebar.slider("Arbitrage Volatility (χ)", 0.005, 0.05, chi, step=0.005)
+    alpha = st.sidebar.slider("Mispricing Impact (α)", 0.1, 1.0, alpha, step=0.1)
+    eta_star = st.sidebar.slider("Mispricing Threshold (η*)", 0.01, 0.2, eta_star, step=0.01)
+    kappa = st.sidebar.slider("Arbitrage Revival (κ)", 0.01, 0.3, kappa, step=0.01)
+    rho_XY = st.sidebar.slider("Price-Volatility Correlation (ρ_XY)", -0.99, 0.99, rho_XY, step=0.01)
+    rho_XZ = st.sidebar.slider("Price-Arbitrage Correlation (ρ_XZ)", -0.99, 0.99, rho_XZ, step=0.01)
+    rho_YZ = st.sidebar.slider("Volatility-Arbitrage Correlation (ρ_YZ)", -0.99, 0.99, rho_YZ, step=0.01)
+
+st.sidebar.header("Options Analysis Parameters")
+all_instruments = get_thalex_instruments()
+coin = "BTC"
+expiries = get_expiries_from_instruments(all_instruments, coin)
+sel_expiry = st.sidebar.selectbox("Options Expiry", expiries, index=0) if expiries else None
+r_rate = st.sidebar.slider("Prime Rate (%)", 0.0, 14.0, 1.6, 0.1) / 100.0
+use_oi_weights = st.sidebar.checkbox("Use OI Weights", value=True)
+run_btn = st.sidebar.button("Run Analysis", use_container_width=True, type="primary", disabled=not sel_expiry)
+
+# --- Main Application ---
+if df is not None and len(df) > 10 and sel_expiry and run_btn:
+    st.header("Stochastic Dynamics and Options Analysis")
+    with st.spinner("Fetching options data..."):
+        df_options = get_thalex_options_data(coin, sel_expiry, all_instruments)
+    if df_options is not None and not df_options.empty:
+        expiry_dt = datetime.strptime(sel_expiry, "%d%b%y").replace(
+            hour=8, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+        )
+        ttm = max((expiry_dt - datetime.now(timezone.utc)).total_seconds() / (365.25 * 24 * 3600), 1e-9)
+        perp_ticker = get_thalex_ticker(f"{coin}-PERPETUAL")
+        spot_price = float(perp_ticker['mark_price']) if perp_ticker and perp_ticker.get('mark_price') else 111085
+        forward_price = spot_price * np.exp(r_rate * ttm)
+        atm_iv = df_options.iloc[(df_options['strike'] - forward_price).abs().argsort()[:1]]['iv'].iloc[0]
+        if pd.isna(atm_iv) or atm_iv <= 0:
+            atm_iv = np.sqrt(V0)
+        S_u_orig = forward_price + 2 * forward_price * atm_iv * np.sqrt(ttm)
+        S_l_orig = max(forward_price - 2 * forward_price * atm_iv * np.sqrt(ttm), 1e-6)
+
+        with st.spinner("Simulating stochastic price paths..."):
+            N = max(100, min(int(ttm * 365), 1000))
+            S, V, eta = simulate_non_equilibrium(
+                S0=spot_price, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
+                chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig, S_l=S_l_orig, kappa=kappa,
+                rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=2000
+            )
 
 st.sidebar.header("Stochastic Dynamics Parameters (Override)")
 override_params = st.sidebar.checkbox("Manually Override Parameters", value=False)
