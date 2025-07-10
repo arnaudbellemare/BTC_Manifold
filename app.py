@@ -500,19 +500,26 @@ if df is not None and len(df) > 10:
     returns = 100 * df['close'].pct_change().dropna()
     current_price = df['close'].iloc[-1] if not df['close'].empty else 111085
     log_returns = np.log(df['close'] / df['close'].shift(1)).dropna()
-    mu = log_returns.mean() * 365 if not log_returns.empty else 0.2
+    log_returns = log_returns[np.isfinite(log_returns)]  # Remove NaNs/infinities
+    if len(log_returns) < 10:
+        logging.warning("Insufficient valid log returns. Using simulated data.")
+        log_returns = np.random.normal(0, 0.01, len(prices)-1)
+    mu = log_returns.mean() * 365 if len(log_returns) > 0 else 0.2
     try:
-        model = arch_model(returns, vol='Garch', p=1, q=1).fit(disp='off', show_warning=False)
-        V0 = (model.conditional_volatility[-1] / 100) ** 2 if model.convergence_flag == 0 else 0.04
-        phi = 1 - (model.params['alpha[1]'] + model.params['beta[1]']) if model.convergence_flag == 0 else 0.5
-        sigma = model.conditional_volatility / 100
-        epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.1
-        logging.info(f"GARCH fit successful - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
+        model = arch_model(returns[np.isfinite(returns)], vol='Garch', p=1, q=1).fit(disp='off', show_warning=False)
+        if model.convergence_flag == 0:
+            V0 = (model.conditional_volatility[-1] / 100) ** 2
+            phi = 1 - (model.params['alpha[1]'] + model.params['beta[1]'])
+            sigma = model.conditional_volatility / 100
+            epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.1
+            logging.info(f"GARCH fit successful - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
+        else:
+            raise Exception("GARCH convergence failed")
     except Exception as e:
-        V0 = (returns.std() / 100) ** 2 if not returns.empty else 0.04
+        V0 = 0.04 if len(returns) == 0 or not np.isfinite(returns.std()) else (returns.std() / 100) ** 2
         phi = 0.5
         epsilon = 0.1
-        sigma = np.full_like(returns, returns.std() / 100 if not returns.empty else 0.02)
+        sigma = np.full_like(returns, 0.02 if len(returns) == 0 or not np.isfinite(returns.std()) else returns.std() / 100)
         logging.warning(f"GARCH fit failed: {e}. Using fallback - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
     lambda_ = np.log(2) / 1.0
     chi = 0.01
@@ -520,15 +527,22 @@ if df is not None and len(df) > 10:
     eta_star = 0.09
     kappa = 0.05
     if len(sigma) > len(log_returns):
-        sigma = sigma[-len(log_returns):]
+        sigma = sigma[:len(log_returns)]
     elif len(sigma) < len(log_returns):
         sigma = np.pad(sigma, (0, len(log_returns) - len(sigma)), mode='edge')
-    if len(log_returns) > 1 and len(sigma) > 1 and np.all(np.isfinite(log_returns)) and np.all(np.isfinite(sigma)):
-        corr = np.corrcoef(log_returns, sigma)[0, 1]
-        rho_XY = np.clip(corr, -0.99, 0.99) if np.isfinite(corr) else 0.3
+    valid_mask = np.isfinite(log_returns) & np.isfinite(sigma)
+    log_returns = log_returns[valid_mask]
+    sigma = sigma[valid_mask]
+    if len(log_returns) > 1 and len(sigma) > 1:
+        try:
+            corr = np.corrcoef(log_returns, sigma)[0, 1]
+            rho_XY = np.clip(corr, -0.99, 0.99) if np.isfinite(corr) else 0.3
+        except:
+            rho_XY = 0.3
+            logging.warning("Correlation computation failed. Using rho_XY=0.3")
     else:
         rho_XY = 0.3
-        logging.warning("Invalid log_returns or sigma for correlation. Using rho_XY=0.3")
+        logging.warning("Insufficient valid data for correlation. Using rho_XY=0.3")
     rho_XZ = 0.2
     rho_YZ = 0.0
     logging.info(f"Correlation data - log_returns len: {len(log_returns)}, sigma len: {len(sigma)}, rho_XY: {rho_XY:.4f}")
@@ -594,7 +608,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
         })
 
         # Volatility comparison
-        realized_vol = np.std(log_returns) * np.sqrt(365) if not log_returns.empty else np.sqrt(V0)
+        realized_vol = np.std(log_returns) * np.sqrt(365) if len(log_returns) > 0 else np.sqrt(V0)
         st.subheader("Volatility Analysis")
         vol_cols = st.columns(2)
         vol_cols[0].metric("Implied Volatility (ATM)", f"{atm_iv:.2%}")
@@ -723,10 +737,9 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 sampled_indices = np.random.choice(2000, size=50, replace=False)
                 sampled_paths = S[sampled_indices, :]
                 path_dfs = [pd.DataFrame({"Time": t_eval, "Price": sampled_paths[i], "Path": f"Simulated Path {i+1}"}) for i in range(50)]
-                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']] + path_dfs], ignore_index=True)
+                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]] + path_dfs, ignore_index=True)
 
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
-                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]] + path_dfs, ignore_index=True)
                 base = alt.Chart(combined_df).encode(
                     x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
