@@ -43,10 +43,10 @@ RSI_BEARISH_THRESHOLD = 35
 def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
     dt = T / N
     S = np.zeros((n_paths, N+1))
-    ln_V = np.zeros((n_paths, N+1))  # Use log-volatility
+    V = np.zeros((n_paths, N+1))
     eta = np.zeros((n_paths, N+1))
     S[:, 0] = max(S0, 1e-6)
-    ln_V[:, 0] = np.log(max(V0, 1e-6))
+    V[:, 0] = max(V0, 1e-6)
     eta[:, 0] = np.clip(eta0, -0.5, 0.5)
 
     # Validate correlation matrix
@@ -63,7 +63,7 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         dW_correlated = dW @ L.T
 
         S_t = S[:, t]
-        V_t = np.exp(ln_V[:, t])  # Convert log-volatility to volatility
+        V_t = V[:, t]
         eta_t = eta[:, t]
         eta_ratio = np.clip(eta_t / eta_star, -2, 2)
         exp_eta = np.exp(np.clip(-eta_ratio**2, -700, 0))
@@ -78,11 +78,11 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         # SDEs
         mu_t = np.clip(mu * (1 - alpha * eta_ratio), -0.3, 0.3)
         dS = mu_t * S_t * dt + np.sqrt(np.maximum(V_t, 1e-6)) * S_t * dW_correlated[:, 0]
-        d_ln_V = phi * (np.log(np.maximum(V0 * exp_eta, 1e-6)) - ln_V[:, t]) * dt + epsilon * exp_eta * dW_correlated[:, 1]
+        dV = phi * (np.maximum(V0 * exp_eta, 1e-6) - V_t) * dt + epsilon * exp_eta * np.sqrt(np.maximum(V_t, 1e-6)) * dW_correlated[:, 1]
         d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
 
         S[:, t+1] = np.clip(S_t + dS, 1e-6, 1e7)
-        ln_V[:, t+1] = ln_V[:, t] + d_ln_V
+        V[:, t+1] = np.maximum(V_t + dV, 1e-6)
         eta[:, t+1] = np.clip(eta_t + d_eta, -1.0, 1.0)
 
         if t % 100 == 0:
@@ -92,7 +92,7 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
     valid_final_prices = final_prices[np.isfinite(final_prices)]
     logging.info(f"Simulation stats - Mean eta: {np.mean(eta):.4f}, Max |eta|: {np.max(np.abs(eta)):.4f}, "
                  f"Valid final prices: {len(valid_final_prices)}, Mean S_final: {np.mean(valid_final_prices):.2f}")
-    return S, np.exp(ln_V), eta
+    return S, V, eta
 # --- Helper Functions ---
 @st.cache_data
 def fetch_kraken_data(symbol, timeframe, start_date, end_date):
