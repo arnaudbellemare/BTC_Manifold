@@ -514,6 +514,13 @@ def benford_law_check(prices):
     fig.update_layout(title="Benford's Law Check for Simulated Prices", xaxis_title="First Digit", yaxis_title="Frequency")
     return fig
 
+def calculate_curvature(S, dt):
+    # Simple curvature R from log S changes (from book eq. 12)
+    log_S = np.log(S)
+    d_log_S = np.diff(log_S, axis=1) / dt
+    R = np.mean(d_log_S, axis=0)  # Average curvature over paths
+    return np.mean(R)  # Aggregate metric
+
 # --- Sidebar Configuration ---
 st.sidebar.header("Model Parameters")
 days_history = st.sidebar.slider("Historical Data (Days)", 7, 180, 90)
@@ -521,6 +528,7 @@ epsilon_factor = st.sidebar.slider("S/R Zone Width Factor", 0.1, 2.0, 0.5, step=
 st.session_state['profitability_threshold'] = st.sidebar.slider("Profitability Confidence Interval (%)", 68, 99, 68, step=1) / 100.0
 liquidity_lambda = st.sidebar.slider("Liquidity Scale (λ)", 100, 1000, 500)  # New for Farmer's term
 advanced_validation = st.sidebar.checkbox("Enable Advanced Validation (Benford's Law)", value=False)
+gauge_invariance_check = st.sidebar.checkbox("Enable Gauge Invariance Check", value=False)
 
 # Calibrate stochastic parameters
 end_date = pd.Timestamp.now(tz='UTC')
@@ -831,6 +839,21 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     else:
                         st.warning("Insufficient data for Benford's law check.")
 
+                # Gauge Invariance Check
+                if gauge_invariance_check:
+                    scale_factor = 2.0  # Arbitrary rescaling
+                    S_scaled, _, _ = simulate_non_equilibrium(
+                        S0=spot_price * scale_factor, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
+                        chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig * scale_factor, S_l=S_l_orig * scale_factor, kappa=kappa,
+                        rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=2000, liquidity_lambda=liquidity_lambda
+                    )
+                    mean_original = np.mean(S[:, -1])
+                    mean_scaled = np.mean(S_scaled[:, -1]) / scale_factor
+                    if abs(mean_original - mean_scaled) < 1e-3 * mean_original:
+                        st.success("Gauge Invariance Check Passed: Rescaled simulation matches original.")
+                    else:
+                        st.warning("Gauge Invariance Check Failed: Rescaled simulation differs.")
+
             with col2:
                 st.subheader("Arbitrage Return Dynamics")
                 eta_chart = alt.Chart(stochastic_df).mark_line(strokeWidth=2).encode(
@@ -841,6 +864,10 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 eta_lines = alt.Chart(pd.DataFrame({"eta_star": [eta_star, -eta_star]})).mark_rule(stroke="red", strokeDash=[5, 5]).encode(y="eta_star:Q")
                 eta_chart = (eta_chart + eta_lines).properties(title="Arbitrage Return with Thresholds", height=300).interactive()
                 st.altair_chart(eta_chart, use_container_width=True)
+
+                # Curvature Metric
+                curvature = calculate_curvature(S, ttm / N)
+                st.metric("Average Curvature (R)", f"{curvature:.4f}")
 
                 st.subheader("Options-Implied Probability Range")
                 if pd.notna(lower_prob_range) and pd.notna(upper_prob_range):
