@@ -23,6 +23,19 @@ import math  # For Benford's law log
 # --- Global Settings ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
 st.set_page_config(layout="wide", page_icon="📊", page_title="BTC Options and Stochastic Dynamics Analysis")
+
+# Custom CSS for aesthetics (dark theme for crypto vibe)
+st.markdown("""
+    <style>
+    .main {background-color: #0e1117; color: #fafafa;}
+    .stSidebar {background-color: #1a1f2e;}
+    .stButton>button {background-color: #4CAF50; color: white;}
+    .stSlider .st-ae {background-color: #1a1f2e;}
+    h1, h2, h3 {color: #4CAF50;}
+    .stAlert {background-color: #ffcc00; color: black;}
+    </style>
+""", unsafe_allow_html=True)
+
 st.title("BTC/USD Options and Non-Equilibrium Stochastic Dynamics Analysis")
 st.markdown("""
 This application models BTC/USD options under non-equilibrium conditions, capturing market instability (e.g., crashes) with a stochastic dynamics model.
@@ -90,7 +103,7 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         dV = phi * (np.maximum(V0 * exp_eta, 1e-6) - V_t) * dt + epsilon * exp_eta * np.sqrt(np.maximum(V_t, 1e-6)) * dW_correlated[:, 1]
         d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
 
-        S[:, t+1] = np.clip(S_t + dS, 1e-6, 1e7)
+        S[:, t+1] = np.clip(S_t + dS, 1e-6, 1e10)  # Increased upper clip for broader range
         V[:, t+1] = np.maximum(V_t + dV, 1e-6)
         eta[:, t+1] = np.clip(eta_t + d_eta, -1.0, 1.0)
 
@@ -141,13 +154,13 @@ def fetch_kraken_data(symbol, timeframe, start_date, end_date):
             logging.info(f"Kraken data fetched: {len(df)} records")
             return df
     
-    st.error("Failed to fetch Kraken data. Using simulated data.")
+    st.error("Failed to fetch Kraken data. Using simulated data with higher volatility.")
     sim_t = pd.date_range(start=start_date, end=end_date, freq='h')
     n = len(sim_t)
-    vol = np.random.normal(0, 0.03, n)
-    vol = 0.02 + 0.01 * np.exp(-np.arange(n)/100) * np.cumsum(vol)
-    sim_prices = 111000 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))
-    logging.warning("Using simulated Kraken data with initial price 111000")
+    vol = np.random.normal(0, 0.05, n)  # Increased vol for broader sim
+    vol = 0.04 + 0.02 * np.exp(-np.arange(n)/100) * np.cumsum(vol)
+    sim_prices = 60000 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))
+    logging.warning("Using simulated Kraken data with initial price 60000 and higher vol")
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'volume': np.random.randint(50, 200, n)})
 
 @st.cache_data(ttl=300)
@@ -437,7 +450,7 @@ def create_interactive_density_chart(price_grid, density, s_levels, r_levels, ep
         yaxis_title="Density",
         showlegend=False,
         hovermode="x unified",
-        template="plotly_white",
+        template="plotly_dark",  # Changed to dark for aesthetics
         height=400
     )
     return fig
@@ -481,7 +494,7 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, 
         title="Historical Volume Profile with S/R Zones and Current Price",
         xaxis_title="Volume Traded",
         yaxis_title="Price (USD)",
-        template="plotly_white",
+        template="plotly_dark",  # Dark theme
         height=400
     )
     return fig, poc
@@ -495,7 +508,7 @@ def create_simulated_paths_chart(t_eval_days, S, stochastic_mean):
         title="Simulated Paths (Separate View)",
         xaxis_title="Time (days)",
         yaxis_title="Price (USD)",
-        template="plotly_white",
+        template="plotly_dark",
         height=400
     )
     return fig
@@ -509,9 +522,9 @@ def benford_law_check(prices):
     # Benford's law probabilities
     benford_probs = [math.log10(1 + 1/d) for d in range(1, 10)]
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=list(range(1, 10)), y=freq[:-1], name='Simulated'))
+    fig.add_trace(go.Bar(x=list(range(1, 10)), y=freq, name='Simulated'))
     fig.add_trace(go.Scatter(x=list(range(1, 10)), y=benford_probs, mode='lines', name="Benford's Law"))
-    fig.update_layout(title="Benford's Law Check for Simulated Prices", xaxis_title="First Digit", yaxis_title="Frequency")
+    fig.update_layout(title="Benford's Law Check for Simulated Prices", xaxis_title="First Digit", yaxis_title="Frequency", template="plotly_dark")
     return fig
 
 def calculate_curvature(S, dt):
@@ -523,12 +536,32 @@ def calculate_curvature(S, dt):
 
 # --- Sidebar Configuration ---
 st.sidebar.header("Model Parameters")
-days_history = st.sidebar.slider("Historical Data (Days)", 7, 180, 90)
-epsilon_factor = st.sidebar.slider("S/R Zone Width Factor", 0.1, 2.0, 0.5, step=0.05)
-st.session_state['profitability_threshold'] = st.sidebar.slider("Profitability Confidence Interval (%)", 68, 99, 68, step=1) / 100.0
-liquidity_lambda = st.sidebar.slider("Liquidity Scale (λ)", 100, 1000, 500)  # New for Farmer's term
-advanced_validation = st.sidebar.checkbox("Enable Advanced Validation (Benford's Law)", value=False)
-gauge_invariance_check = st.sidebar.checkbox("Enable Gauge Invariance Check", value=False)
+days_history = st.sidebar.slider("Historical Data (Days)", 7, 180, 90, help="Number of days of historical data to fetch from Kraken.")
+epsilon_factor = st.sidebar.slider("S/R Zone Width Factor", 0.1, 2.0, 0.5, step=0.05, help="Factor to determine width of support/resistance zones.")
+st.session_state['profitability_threshold'] = st.sidebar.slider("Profitability Confidence Interval (%)", 68, 99, 68, step=1, help="Confidence level for probability ranges.") / 100.0
+liquidity_lambda = st.sidebar.slider("Liquidity Scale (λ)", 100, 1000, 500, help="Liquidity parameter for Farmer's term in simulation.")  # New for Farmer's term
+advanced_validation = st.sidebar.checkbox("Enable Advanced Validation (Benford's Law)", value=False, help="Check simulation realism using Benford's Law.")
+gauge_invariance_check = st.sidebar.checkbox("Enable Gauge Invariance Check", value=False, help="Verify model robustness under rescaling.")
+simulation_T_override = st.sidebar.slider("Simulation Horizon Override (years)", 0.1, 5.0, 0.0, step=0.1, help="Override simulation time; 0 uses expiry TTM.")  # 0.0 = use ttm from expiry
+
+# Parameter Presets for usefulness
+preset = st.sidebar.selectbox("Parameter Preset", ["Default", "Low Volatility", "High Volatility", "Crash Scenario"], help="Quick presets for different market conditions.")
+if preset == "Low Volatility":
+    mu_preset = 0.1
+    epsilon_preset = 0.1
+    chi_preset = 0.01
+elif preset == "High Volatility":
+    mu_preset = 0.3
+    epsilon_preset = 0.4
+    chi_preset = 0.08
+elif preset == "Crash Scenario":
+    mu_preset = -0.2
+    epsilon_preset = 0.5
+    chi_preset = 0.1
+else:
+    mu_preset = 0.3
+    epsilon_preset = 0.3
+    chi_preset = 0.05
 
 # Calibrate stochastic parameters
 end_date = pd.Timestamp.now(tz='UTC')
@@ -548,25 +581,25 @@ if df is not None and len(df) > 10:
     if len(log_returns) < 10:
         logging.warning("Insufficient valid log returns. Using simulated data.")
         log_returns = np.random.normal(0, 0.01, len(prices)-1)
-    mu = log_returns.mean() * 365 if len(log_returns) > 0 else 0.2
+    mu = log_returns.mean() * 365 if len(log_returns) > 0 else mu_preset  # Use preset
     try:
         model = arch_model(returns[np.isfinite(returns)], vol='Garch', p=1, q=1).fit(disp='off', show_warning=False)
         if model.convergence_flag == 0:
             V0 = (model.conditional_volatility[-1] / 100) ** 2
             phi = 1 - (model.params['alpha[1]'] + model.params['beta[1]'])
             sigma = model.conditional_volatility / 100
-            epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.1
+            epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else epsilon_preset  # Use preset fallback
             logging.info(f"GARCH fit successful - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
         else:
             raise Exception("GARCH convergence failed")
     except Exception as e:
         V0 = 0.04 if len(returns) == 0 or not np.isfinite(returns.std()) else (returns.std() / 100) ** 2
         phi = 0.5
-        epsilon = 0.1
+        epsilon = epsilon_preset  # Use preset fallback
         sigma = np.full_like(returns, 0.02 if len(returns) == 0 or not np.isfinite(returns.std()) else returns.std() / 100)
         logging.warning(f"GARCH fit failed: {e}. Using fallback - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
     lambda_ = np.log(2) / 1.0
-    chi = 0.01
+    chi = chi_preset  # Use preset
     alpha = 0.6
     eta_star = 0.09
     kappa = 0.05
@@ -592,32 +625,33 @@ if df is not None and len(df) > 10:
     logging.info(f"Correlation data - log_returns len: {len(log_returns)}, sigma len: {len(sigma)}, rho_XY: {rho_XY:.4f}")
 
 st.sidebar.header("Stochastic Dynamics Parameters (Override)")
-override_params = st.sidebar.checkbox("Manually Override Parameters", value=False)
+override_params = st.sidebar.checkbox("Manually Override Parameters", value=False, help="Override auto-calibrated parameters.")
 if override_params:
-    mu = st.sidebar.slider("Price Drift (μ)", 0.0, 0.3, mu, step=0.01)
-    phi = st.sidebar.slider("Volatility Mean Reversion (φ)", 0.1, 2.0, phi, step=0.1)
-    epsilon = st.sidebar.slider("Volatility of Volatility (ε)", 0.01, 0.2, epsilon, step=0.01)
-    lambda_ = st.sidebar.slider("Arbitrage Mean Reversion (λ)", 0.1, 2.0, lambda_, step=0.1)
-    chi = st.sidebar.slider("Arbitrage Volatility (χ)", 0.005, 0.05, chi, step=0.005)
-    alpha = st.sidebar.slider("Mispricing Impact (α)", 0.1, 1.0, alpha, step=0.1)
-    eta_star = st.sidebar.slider("Mispricing Threshold (η*)", 0.01, 0.2, eta_star, step=0.01)
-    kappa = st.sidebar.slider("Arbitrage Revival (κ)", 0.01, 0.3, kappa, step=0.01)
-    rho_XY = st.sidebar.slider("Price-Volatility Correlation (ρ_XY)", -0.99, 0.99, rho_XY, step=0.01)
-    rho_XZ = st.sidebar.slider("Price-Arbitrage Correlation (ρ_XZ)", -0.99, 0.99, rho_XZ, step=0.01)
-    rho_YZ = st.sidebar.slider("Volatility-Arbitrage Correlation (ρ_YZ)", -0.99, 0.99, rho_YZ, step=0.01)
+    mu = st.sidebar.slider("Price Drift (μ)", 0.0, 0.5, mu, step=0.01, help="Annual drift rate for price.")  # Higher max
+    phi = st.sidebar.slider("Volatility Mean Reversion (φ)", 0.1, 2.0, phi, step=0.1, help="Speed of volatility reversion to mean.")
+    epsilon = st.sidebar.slider("Volatility of Volatility (ε)", 0.01, 0.5, epsilon, step=0.01, help="Volatility of the volatility process.")  # Higher max
+    lambda_ = st.sidebar.slider("Arbitrage Mean Reversion (λ)", 0.1, 2.0, lambda_, step=0.1, help="Speed of arbitrage factor reversion.")
+    chi = st.sidebar.slider("Arbitrage Volatility (χ)", 0.005, 0.1, chi, step=0.005, help="Volatility of the arbitrage process.")  # Higher max
+    alpha = st.sidebar.slider("Mispricing Impact (α)", 0.1, 1.0, alpha, step=0.1, help="Impact of mispricing on drift.")
+    eta_star = st.sidebar.slider("Mispricing Threshold (η*)", 0.01, 0.2, eta_star, step=0.01, help="Threshold for mispricing factor.")
+    kappa = st.sidebar.slider("Arbitrage Revival (κ)", 0.01, 0.3, kappa, step=0.01, help="Revival rate near bounds.")
+    rho_XY = st.sidebar.slider("Price-Volatility Correlation (ρ_XY)", -0.99, 0.99, rho_XY, step=0.01, help="Correlation between price and volatility.")
+    rho_XZ = st.sidebar.slider("Price-Arbitrage Correlation (ρ_XZ)", -0.99, 0.99, rho_XZ, step=0.01, help="Correlation between price and arbitrage.")
+    rho_YZ = st.sidebar.slider("Volatility-Arbitrage Correlation (ρ_YZ)", -0.99, 0.99, rho_YZ, step=0.01, help="Correlation between volatility and arbitrage.")
 
 st.sidebar.header("Options Analysis Parameters")
 all_instruments = get_thalex_instruments()
 coin = "BTC"
 expiries = get_expiries_from_instruments(all_instruments, coin)
-sel_expiry = st.sidebar.selectbox("Options Expiry", expiries, index=0) if expiries else None
-r_rate = st.sidebar.slider("Prime Rate (%)", 0.0, 14.0, 1.6, 0.1) / 100.0
-use_oi_weights = st.sidebar.checkbox("Use OI Weights", value=True)
+sel_expiry = st.sidebar.selectbox("Options Expiry", expiries, index=0, help="Select the options expiry date.") if expiries else None
+r_rate = st.sidebar.slider("Prime Rate (%)", 0.0, 14.0, 1.6, 0.1, help="Interest rate for pricing.") / 100.0
+use_oi_weights = st.sidebar.checkbox("Use OI Weights", value=True, help="Weight SVI calibration by open interest.")
 run_btn = st.sidebar.button("Run Analysis", use_container_width=True, type="primary", disabled=not sel_expiry)
 
-# --- Main Application ---
+# --- Main Application with Tabs for better UX ---
+tab1, tab2, tab3 = st.tabs(["Overview & Simulation", "Volatility & Probabilities", "Volume & Options Chain"])
+
 if df is not None and len(df) > 10 and sel_expiry and run_btn:
-    st.header("Stochastic Dynamics and Options Analysis")
     with st.spinner("Fetching options data..."):
         df_options = get_thalex_options_data(coin, sel_expiry, all_instruments)
     if df_options is not None and not df_options.empty:
@@ -631,18 +665,19 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
         atm_iv = df_options.iloc[(df_options['strike'] - forward_price).abs().argsort()[:1]]['iv'].iloc[0]
         if pd.isna(atm_iv) or atm_iv <= 0:
             atm_iv = np.sqrt(V0)
-        S_u_orig = forward_price + 2 * forward_price * atm_iv * np.sqrt(ttm)
-        S_l_orig = max(forward_price - 2 * forward_price * atm_iv * np.sqrt(ttm), 1e-6)
+        S_u_orig = forward_price * 10  # Wider bound
+        S_l_orig = max(forward_price / 10, 1e-6)  # Wider bound
+        simulation_T = simulation_T_override if simulation_T_override > 0 else ttm  # Override if set
 
         with st.spinner("Simulating stochastic price paths..."):
-            N = max(100, min(int(ttm * 365), 1000))
+            N = max(100, min(int(simulation_T * 365), 1000))
             S, V, eta = simulate_non_equilibrium(
                 S0=spot_price, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
                 chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig, S_l=S_l_orig, kappa=kappa,
-                rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=2000, liquidity_lambda=liquidity_lambda
+                rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=simulation_T, N=N, n_paths=2000, liquidity_lambda=liquidity_lambda
             )
 
-        t_eval = np.linspace(0, ttm, N + 1)
+        t_eval = np.linspace(0, simulation_T, N + 1)
         t_eval_days = t_eval * 365.25  # Scale to days for plotting
         stochastic_df = pd.DataFrame({
             "Time": t_eval,
@@ -655,14 +690,16 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
 
         # Volatility comparison
         realized_vol = np.std(log_returns) * np.sqrt(365) if len(log_returns) > 0 else np.sqrt(V0)
-        st.subheader("Volatility Analysis")
-        vol_cols = st.columns(2)
-        vol_cols[0].metric("Implied Volatility (ATM)", f"{atm_iv:.2%}")
-        vol_cols[1].metric("Realized Volatility (Historical)", f"{realized_vol:.2%}")
-        if atm_iv > realized_vol * (1 + Z_SCORE_HIGH_IV_THRESHOLD):
-            st.warning("Implied volatility significantly higher than realized: Potential overpricing or expected market stress.")
-        elif atm_iv < realized_vol * (1 + Z_SCORE_LOW_IV_THRESHOLD):
-            st.warning("Implied volatility significantly lower than realized: Potential underpricing or market stability.")
+        
+        with tab2:
+            st.subheader("Volatility Analysis")
+            vol_cols = st.columns(2)
+            vol_cols[0].metric("Implied Volatility (ATM)", f"{atm_iv:.2%}")
+            vol_cols[1].metric("Realized Volatility (Historical)", f"{realized_vol:.2%}")
+            if atm_iv > realized_vol * (1 + Z_SCORE_HIGH_IV_THRESHOLD):
+                st.warning("Implied volatility significantly higher than realized: Potential overpricing or expected market stress.")
+            elif atm_iv < realized_vol * (1 + Z_SCORE_LOW_IV_THRESHOLD):
+                st.warning("Implied volatility significantly lower than realized: Potential underpricing or market stability.")
 
         # Derive cluster-based S_l and S_u
         final_prices = S[:, -1]
@@ -726,8 +763,8 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             if len(final_prices) < 10:
                 st.warning("Insufficient valid final prices for KDE. Using normal distribution fallback.")
                 logging.warning(f"Final prices count: {len(final_prices)}. Using normal fallback.")
-                mean_price = spot_price * np.exp(mu * ttm)
-                std_price = spot_price * np.sqrt(V0) * np.sqrt(ttm) * 2.5
+                mean_price = spot_price * np.exp(mu * simulation_T)
+                std_price = spot_price * np.sqrt(V0) * np.sqrt(simulation_T) * 2.5
                 final_prices = np.random.normal(mean_price, std_price, 1000)
                 final_prices = final_prices[final_prices > 0]
             u = np.zeros_like(price_grid)
@@ -768,8 +805,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             confidence_level = st.session_state.get('profitability_threshold', 0.68)
             lower_prob_range, upper_prob_range = calculate_probability_range(price_grid, u, confidence_level)
 
-            col1, col2 = st.columns([2, 1])
-            with col1:
+            with tab1:
                 st.subheader("Price Path and Stochastic Dynamics")
                 if len(times) != len(prices):
                     st.warning(f"Data mismatch: Truncating times to match prices length ({len(prices)})")
@@ -785,7 +821,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 path_dfs = [pd.DataFrame({"Time": t_eval, "Price": sampled_paths[i], "Path": "Simulated Path", "ID": str(i+1)}) for i in range(50)]
                 combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path', 'ID']]] + path_dfs, ignore_index=True)
 
-                max_time = max(times.max() if len(times) > 0 else 0, ttm)
+                max_time = max(times.max() if len(times) > 0 else 0, simulation_T)
                 base = alt.Chart(combined_df).encode(
                     x=alt.X("Time:Q", title="Time (years)", scale=alt.Scale(domain=[0, max_time + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
@@ -799,10 +835,10 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 orig_resistance_df = pd.DataFrame({"Price": [S_u_orig]})
                 orig_support_lines = alt.Chart(orig_support_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
                 orig_resistance_lines = alt.Chart(orig_resistance_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
-                support_levels = [level for level in cluster_levels if level <= (S_l + S_u) / 2]
-                resistance_levels = [level for level in cluster_levels if level > (S_l + S_u) / 2]
-                support_df = pd.DataFrame({"Price": support_levels})
-                resistance_df = pd.DataFrame({"Price": resistance_levels})
+                support_levels_list = [level for level in cluster_levels if level <= (S_l + S_u) / 2]
+                resistance_levels_list = [level for level in cluster_levels if level > (S_l + S_u) / 2]
+                support_df = pd.DataFrame({"Price": support_levels_list})
+                resistance_df = pd.DataFrame({"Price": resistance_levels_list})
                 support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
                 resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
                 chart_layers = [historical_line, stochastic_line, simulated_lines, orig_support_lines, orig_resistance_lines, support_lines, resistance_lines]
@@ -846,7 +882,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     S_orig, _, _ = simulate_non_equilibrium(  # Original
                         S0=spot_price, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
                         chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig, S_l=S_l_orig, kappa=kappa,
-                        rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=2000, liquidity_lambda=liquidity_lambda
+                        rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=simulation_T, N=N, n_paths=2000, liquidity_lambda=liquidity_lambda
                     )
                     mean_original = np.mean(S_orig[:, -1])
 
@@ -854,7 +890,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     S_scaled, _, _ = simulate_non_equilibrium(
                         S0=spot_price * scale_factor, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
                         chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig * scale_factor, S_l=S_l_orig * scale_factor, kappa=kappa,
-                        rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=2000, liquidity_lambda=liquidity_lambda
+                        rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=simulation_T, N=N, n_paths=2000, liquidity_lambda=liquidity_lambda
                     )
                     mean_scaled = np.mean(S_scaled[:, -1]) / scale_factor
 
@@ -863,7 +899,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     else:
                         st.warning("Gauge Invariance Check Failed: Rescaled simulation differs.")
 
-            with col2:
+            with tab2:
                 st.subheader("Arbitrage Return Dynamics")
                 eta_chart = alt.Chart(stochastic_df).mark_line(strokeWidth=2).encode(
                     x=alt.X("Time:Q", title="Time (years)"),
@@ -875,7 +911,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 st.altair_chart(eta_chart, use_container_width=True)
 
                 # Curvature Metric
-                curvature = calculate_curvature(S, ttm / N)
+                curvature = calculate_curvature(S, simulation_T / N)
                 st.metric("Average Curvature (R)", f"{curvature:.4f}")
 
                 st.subheader("Options-Implied Probability Range")
@@ -907,11 +943,16 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     )
                     st.plotly_chart(interactive_density_fig, use_container_width=True)
 
-            st.header("Volume Profile and Options Chain")
-            volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon, current_price)
-            if volume_profile_fig:
-                st.plotly_chart(volume_profile_fig, use_container_width=True)
-                st.metric("Point of Control (POC)", f"${poc['price_bin']:,.2f}")
-                st.metric("Current Price", f"${current_price:,.2f}")
+            with tab3:
+                st.header("Volume Profile and Options Chain")
+                volume_profile_fig, poc = create_volume_profile_chart(df, support_levels, resistance_levels, epsilon, current_price)
+                if volume_profile_fig:
+                    st.plotly_chart(volume_profile_fig, use_container_width=True)
+                    st.metric("Point of Control (POC)", f"${poc['price_bin']:,.2f}")
+                    st.metric("Current Price", f"${current_price:,.2f}")
+                # Add options chain table
+                st.subheader("Options Chain Data")
+                st.dataframe(df_options.style.format({'strike': '${:,.2f}', 'mark_price': '${:,.2f}', 'iv': '{:.2%}', 'open_interest': '{:,.0f}', 'delta': '{:.2f}'}))
+
 else:
     st.error("Could not load or process spot data. Check parameters or try again.")
