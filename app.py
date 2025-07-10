@@ -41,7 +41,7 @@ RSI_BULLISH_THRESHOLD = 65
 RSI_BEARISH_THRESHOLD = 35
 
 # --- Stochastic Dynamics Simulation ---
-def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
+def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=100):
     dt = T / N
     S = np.zeros((n_paths, N+1))
     V = np.zeros((n_paths, N+1))
@@ -567,6 +567,34 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             "Path": "Stochastic Mean"
         })
 
+        # Derive S_l and S_u from simulated path clusters
+        final_prices = S[:, -1]
+        final_prices = final_prices[np.isfinite(final_prices)]  # Clean inf/NaN
+        if len(final_prices) > 10:  # Ensure enough data for clustering
+            X = final_prices.reshape(-1, 1)
+            db = DBSCAN(eps=spot_price * 0.05, min_samples=5).fit(X)  # 5% of spot price as epsilon
+            labels = db.labels_
+            unique_labels = set(labels) - {-1}  # Exclude noise points
+            if unique_labels:
+                cluster_centers = [np.mean(final_prices[labels == label]) for label in unique_labels]
+                if len(cluster_centers) >= 2:
+                    cluster_centers.sort()
+                    S_l_sim = cluster_centers[0]  # Lowest cluster as support
+                    S_u_sim = cluster_centers[-1]  # Highest cluster as resistance
+                else:
+                    S_l_sim = np.percentile(final_prices, 2.5)  # 2.5th percentile as fallback
+                    S_u_sim = np.percentile(final_prices, 97.5)  # 97.5th percentile as fallback
+            else:
+                S_l_sim = np.percentile(final_prices, 2.5)
+                S_u_sim = np.percentile(final_prices, 97.5)
+        else:
+            S_l_sim = S_l  # Fall back to original if not enough data
+            S_u_sim = S_u
+
+        # Update S_l and S_u with simulation-based values
+        S_l = S_l_sim
+        S_u = S_u_sim
+
         with st.spinner("Calibrating SVI model..."):
             market_strikes = df_options['strike'].values
             market_ivs = df_options['iv'].values
@@ -644,14 +672,14 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 stochastic_df['Time'] = t_eval
                 combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]], ignore_index=True)
                 
-                # Ensure x-axis covers the full simulation period
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
                     x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[S_l-5000, S_u+5000])),
                     color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"], range=["blue", "orange"]))
                 )
-                price_line = base.mark_line(strokeWidth=2, interpolate='linear').encode(detail='Path:N')  # Ensure continuous line
+                price_line = base.mark_line(strokeWidth=2, interpolate='linear').encode(detail='Path:N')
+                stochastic_line = base.transform_filter(alt.datum.Path == "Stochastic Mean").mark_line(strokeWidth=2, interpolate='linear', opacity=0.8)
                 
                 support_df = pd.DataFrame({"Price": [S_l]})
                 resistance_df = pd.DataFrame({"Price": [S_u]})
@@ -669,8 +697,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                         y2='upper_bound:Q'
                     )
                 
-                # Combine layers in the correct order
-                chart = (prob_band + price_line + support_lines + resistance_lines).properties(
+                chart = (prob_band + price_line + stochastic_line + support_lines + resistance_lines).properties(
                     title="Price Path, Stochastic Mean, and S/R Bounds with Prob Range",
                     height=500
                 ).interactive()
@@ -704,7 +731,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     support_data = pd.DataFrame({'Level': support_levels, 'Hit %': support_probs})
                     st.dataframe(support_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
 
-                with sub_col2:
+                with col2:
                     st.markdown("**Resistance Levels**")
                     resistance_data = pd.DataFrame({'Level': resistance_levels, 'Hit %': resistance_probs})
                     st.dataframe(resistance_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
