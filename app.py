@@ -734,7 +734,6 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 historical_line = base.transform_filter(alt.datum.Path == "Historical Price").mark_line(strokeWidth=3).encode(detail='Path:N')
                 stochastic_line = base.transform_filter(alt.datum.Path == "Stochastic Mean").mark_line(strokeWidth=2).encode(detail='Path:N')
                 simulated_lines = base.transform_filter(alt.datum.Path.startswith("Simulated Path")).mark_line(strokeWidth=1).encode(detail='Path:N')
-                price_line = base.mark_line(strokeWidth=alt.condition(alt.datum.Path == "Historical Price", alt.value(3), alt.condition(alt.datum.Path == "Stochastic Mean", alt.value(2), alt.value(1)))).encode(detail='Path:N')
                 orig_support_df = pd.DataFrame({"Price": [S_l_orig]})
                 orig_resistance_df = pd.DataFrame({"Price": [S_u_orig]})
                 orig_support_lines = alt.Chart(orig_support_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
@@ -745,7 +744,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 resistance_df = pd.DataFrame({"Price": resistance_levels})
                 support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
                 resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
-                chart_layers = [price_line, orig_support_lines, orig_resistance_lines, support_lines, resistance_lines]
+                chart_layers = [historical_line, stochastic_line, simulated_lines, orig_support_lines, orig_resistance_lines, support_lines, resistance_lines]
                 if pd.notna(lower_prob_range) and pd.notna(upper_prob_range):
                     prob_range_df = pd.DataFrame({
                         'lower_bound': [lower_prob_range],
