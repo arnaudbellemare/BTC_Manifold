@@ -40,6 +40,7 @@ Z_SCORE_LOW_IV_THRESHOLD = -1.0
 RSI_BULLISH_THRESHOLD = 65
 RSI_BEARISH_THRESHOLD = 35
 
+# --- Stochastic Dynamics Simulation ---
 def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
     dt = T / N
     S = np.zeros((n_paths, N+1))
@@ -93,6 +94,7 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
     logging.info(f"Simulation stats - Mean eta: {np.mean(eta):.4f}, Max |eta|: {np.max(np.abs(eta)):.4f}, "
                  f"Valid final prices: {len(valid_final_prices)}, Mean S_final: {np.mean(valid_final_prices):.2f}")
     return S, V, eta
+
 # --- Helper Functions ---
 @st.cache_data
 def fetch_kraken_data(symbol, timeframe, start_date, end_date):
@@ -475,7 +477,7 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, 
 
 # --- Sidebar Configuration ---
 st.sidebar.header("Model Parameters")
-days_history = st.sidebar.slider("Historical Data (Days)", 7, 180, 90)  # Extended for better calibration
+days_history = st.sidebar.slider("Historical Data (Days)", 7, 180, 90)
 epsilon_factor = st.sidebar.slider("S/R Zone Width Factor", 0.1, 2.0, 0.5, step=0.05)
 st.session_state['profitability_threshold'] = st.sidebar.slider("Profitability Confidence Interval (%)", 68, 99, 68, step=1) / 100.0
 
@@ -499,16 +501,16 @@ if df is not None and len(df) > 10:
         V0 = (model.conditional_volatility[-1] / 100) ** 2 if model.convergence_flag == 0 else 0.04
         phi = 1 - (model.params['alpha[1]'] + model.params['beta[1]']) if model.convergence_flag == 0 else 0.5
         sigma = model.conditional_volatility / 100
-        epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.12
+        epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.1
         logging.info(f"GARCH fit successful - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
     except Exception as e:
         V0 = (returns.std() / 100) ** 2 if not returns.empty else 0.04
         phi = 0.5
-        epsilon = 0.12
+        epsilon = 0.1
         sigma = np.full_like(returns, returns.std() / 100 if not returns.empty else 0.02)
         logging.warning(f"GARCH fit failed: {e}. Using fallback - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
     lambda_ = np.log(2) / 1.0
-    chi = 0.015
+    chi = 0.01
     alpha = 0.6
     eta_star = 0.09
     kappa = 0.05
@@ -569,7 +571,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             S, V, eta = simulate_non_equilibrium(
                 S0=spot_price, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
                 chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig, S_l=S_l_orig, kappa=kappa,
-                rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=200
+                rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=2000
             )
 
         t_eval = np.linspace(0, ttm, N + 1)
@@ -708,30 +710,30 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
 
                 price_df = pd.DataFrame({"Time": times, "Price": prices, "Path": "Historical Price"})
                 stochastic_df['Time'] = t_eval
-                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]], ignore_index=True)
+                sampled_indices = np.random.choice(2000, size=50, replace=False)
+                sampled_paths = S[sampled_indices, :]
+                path_dfs = [pd.DataFrame({"Time": t_eval, "Price": sampled_paths[i], "Path": f"Simulated Path {i+1}"}) for i in range(50)]
+                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]] + path_dfs, ignore_index=True)
 
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
                     x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
-                    color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"], range=["blue", "orange"]))
+                    color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"] + [f"Simulated Path {i+1}" for i in range(50)], range=["blue", "orange"] + ["gray"]*50)),
+                    opacity=alt.condition(alt.datum.Path == "Historical Price", alt.value(1.0), alt.condition(alt.datum.Path == "Stochastic Mean", alt.value(0.8), alt.value(0.05)))
                 )
                 price_line = base.mark_line(strokeWidth=2, interpolate='linear').encode(detail='Path:N')
-                stochastic_line = base.transform_filter(alt.datum.Path == "Stochastic Mean").mark_line(strokeWidth=2, interpolate='linear', opacity=0.8)
-
                 orig_support_df = pd.DataFrame({"Price": [S_l_orig]})
                 orig_resistance_df = pd.DataFrame({"Price": [S_u_orig]})
                 orig_support_lines = alt.Chart(orig_support_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
                 orig_resistance_lines = alt.Chart(orig_resistance_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
-
                 support_levels = [level for level in cluster_levels if level <= (S_l + S_u) / 2]
                 resistance_levels = [level for level in cluster_levels if level > (S_l + S_u) / 2]
                 support_df = pd.DataFrame({"Price": support_levels})
                 resistance_df = pd.DataFrame({"Price": resistance_levels})
                 support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
                 resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
-
-                chart_layers = [price_line, stochastic_line, orig_support_lines, orig_resistance_lines, support_lines, resistance_lines]
+                chart_layers = [price_line, orig_support_lines, orig_resistance_lines, support_lines, resistance_lines]
                 if pd.notna(lower_prob_range) and pd.notna(upper_prob_range):
                     prob_range_df = pd.DataFrame({
                         'lower_bound': [lower_prob_range],
@@ -745,7 +747,6 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     chart_layers.append(prob_band)
                 else:
                     st.warning("Probability range not available due to invalid KDE output.")
-
                 chart = alt.layer(*chart_layers).properties(
                     title="Price Path, Stochastic Mean, and S/R Bounds with Prob Range",
                     height=500
