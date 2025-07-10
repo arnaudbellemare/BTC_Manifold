@@ -842,13 +842,22 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 # Gauge Invariance Check
                 if gauge_invariance_check:
                     scale_factor = 2.0  # Arbitrary rescaling
+                    np.random.seed(42)  # Fix seed for reproducibility
+                    S_orig, _, _ = simulate_non_equilibrium(  # Original
+                        S0=spot_price, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
+                        chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig, S_l=S_l_orig, kappa=kappa,
+                        rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=2000, liquidity_lambda=liquidity_lambda
+                    )
+                    mean_original = np.mean(S_orig[:, -1])
+
+                    np.random.seed(42)  # Same seed for scaled run
                     S_scaled, _, _ = simulate_non_equilibrium(
                         S0=spot_price * scale_factor, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
                         chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig * scale_factor, S_l=S_l_orig * scale_factor, kappa=kappa,
                         rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=2000, liquidity_lambda=liquidity_lambda
                     )
-                    mean_original = np.mean(S[:, -1])
                     mean_scaled = np.mean(S_scaled[:, -1]) / scale_factor
+
                     if abs(mean_original - mean_scaled) < 1e-3 * mean_original:
                         st.success("Gauge Invariance Check Passed: Rescaled simulation matches original.")
                     else:
