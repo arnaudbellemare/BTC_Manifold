@@ -18,6 +18,7 @@ from typing import Optional, Dict, List
 import time
 from statsmodels.tsa.stattools import adfuller
 from tenacity import retry, stop_after_attempt, wait_exponential
+import math  # For Benford's law log
 
 # --- Global Settings ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
@@ -499,11 +500,27 @@ def create_simulated_paths_chart(t_eval_days, S, stochastic_mean):
     )
     return fig
 
+def benford_law_check(prices):
+    # Extract first digits (ignore zeros and negatives)
+    first_digits = [int(str(p)[0]) for p in prices if p > 0 and str(p)[0] != '0']
+    if not first_digits:
+        return None
+    freq, bins = np.histogram(first_digits, bins=range(1, 11), density=True)
+    # Benford's law probabilities
+    benford_probs = [math.log10(1 + 1/d) for d in range(1, 10)]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=list(range(1, 10)), y=freq[:-1], name='Simulated'))
+    fig.add_trace(go.Scatter(x=list(range(1, 10)), y=benford_probs, mode='lines', name="Benford's Law"))
+    fig.update_layout(title="Benford's Law Check for Simulated Prices", xaxis_title="First Digit", yaxis_title="Frequency")
+    return fig
+
 # --- Sidebar Configuration ---
 st.sidebar.header("Model Parameters")
 days_history = st.sidebar.slider("Historical Data (Days)", 7, 180, 90)
 epsilon_factor = st.sidebar.slider("S/R Zone Width Factor", 0.1, 2.0, 0.5, step=0.05)
 st.session_state['profitability_threshold'] = st.sidebar.slider("Profitability Confidence Interval (%)", 68, 99, 68, step=1) / 100.0
+liquidity_lambda = st.sidebar.slider("Liquidity Scale (λ)", 100, 1000, 500)  # New for Farmer's term
+advanced_validation = st.sidebar.checkbox("Enable Advanced Validation (Benford's Law)", value=False)
 
 # Calibrate stochastic parameters
 end_date = pd.Timestamp.now(tz='UTC')
@@ -614,7 +631,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             S, V, eta = simulate_non_equilibrium(
                 S0=spot_price, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
                 chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u_orig, S_l=S_l_orig, kappa=kappa,
-                rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=2000
+                rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=N, n_paths=2000, liquidity_lambda=liquidity_lambda
             )
 
         t_eval = np.linspace(0, ttm, N + 1)
@@ -804,6 +821,15 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 st.subheader("Simulated Paths (Separate View)")
                 simulated_fig = create_simulated_paths_chart(t_eval_days, S, stochastic_df['Price'].values)
                 st.plotly_chart(simulated_fig, use_container_width=True)
+
+                # Advanced Validation: Benford's Law
+                if advanced_validation:
+                    benford_fig = benford_law_check(final_prices)
+                    if benford_fig:
+                        st.subheader("Benford's Law Validation for Simulated Prices")
+                        st.plotly_chart(benford_fig, use_container_width=True)
+                    else:
+                        st.warning("Insufficient data for Benford's law check.")
 
             with col2:
                 st.subheader("Arbitrage Return Dynamics")
