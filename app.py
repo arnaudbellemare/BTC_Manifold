@@ -40,7 +40,6 @@ Z_SCORE_LOW_IV_THRESHOLD = -1.0
 RSI_BULLISH_THRESHOLD = 65
 RSI_BEARISH_THRESHOLD = 35
 
-# --- Stochastic Dynamics Simulation ---
 def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
     dt = T / N
     S = np.zeros((n_paths, N+1))
@@ -54,7 +53,11 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
     corr_matrix = np.array([[1.0, rho_XY, rho_XZ],
                             [rho_XY, 1.0, rho_YZ],
                             [rho_XZ, rho_YZ, 1.0]])
-    L = np.linalg.cholesky(corr_matrix)
+    try:
+        L = np.linalg.cholesky(corr_matrix)
+    except np.linalg.LinAlgError:
+        logging.warning("Correlation matrix not positive definite. Using identity matrix.")
+        L = np.eye(3)
 
     for t in range(N):
         dW = np.random.normal(0, np.sqrt(dt), (n_paths, 3))
@@ -64,27 +67,27 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         V_t = V[:, t]
         eta_t = eta[:, t]
         eta_ratio = eta_t / eta_star
-        exp_eta = np.exp(np.clip(-eta_ratio**2, -700, 0))  # Clip to avoid overflow
+        exp_eta = np.exp(np.clip(-eta_ratio**2, -700, 0))
 
-        # Compute the price bound term as per the text: (2S/S_u - S_l/S_u - 1)^2
+        # Price bound term as per text
         price_bound_term = (2 * S_t / S_u - S_l / S_u - 1)**2
-        exp_bound = 1 - np.exp(np.clip(-price_bound_term, -700, 0))  # 1 - e^(-term)
+        exp_bound = 1 - np.exp(np.clip(-price_bound_term, -700, 0))
 
-        # Mean reversion rate: lambda * e^(-(\eta/\eta_star)^2) for all \eta
-        lambda_eff = lambda_ * exp_eta  # No 0.1 factor for |\eta| > \eta_star
+        # Mean reversion rate
+        lambda_eff = lambda_ * exp_eta
 
-        # SDEs as per the text
+        # SDEs
         dS = mu * (1 - alpha * eta_ratio) * S_t * dt + np.sqrt(np.maximum(V_t, 1e-6)) * S_t * dW_correlated[:, 0]
         dV = phi * (V0 * exp_eta - V_t) * dt + epsilon * exp_eta * np.sqrt(np.maximum(V_t, 1e-6)) * dW_correlated[:, 1]
         d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
 
-        S[:, t+1] = np.clip(S_t + dS, 1e-6, np.inf)  # Prevent negative or zero prices
-        V[:, t+1] = np.maximum(V_t + dV, 1e-6)  # Ensure positive variance
-        eta[:, t+1] = eta_t + d_eta
+        # Update with bounds to prevent numerical issues
+        S[:, t+1] = np.clip(S_t + dS, 1e-6, 1e6)  # Cap prices to prevent explosion
+        V[:, t+1] = np.maximum(V_t + dV, 1e-6)   # Ensure positive variance
+        eta[:, t+1] = np.clip(eta_t + d_eta, -1.0, 1.0)  # Limit arbitrage return
 
     logging.info(f"Simulation stats - Mean eta: {np.mean(eta):.4f}, Max |eta|: {np.max(np.abs(eta)):.4f}, Non-eq count: {np.sum(np.abs(eta) > eta_star)}")
     return S, V, eta
-
 # --- Helper Functions ---
 @st.cache_data
 def fetch_kraken_data(symbol, timeframe, start_date, end_date):
