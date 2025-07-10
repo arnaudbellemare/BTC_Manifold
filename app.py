@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 st.set_page_config(layout="wide", page_icon="📊", page_title="BTC Options and Stochastic Dynamics Analysis")
 st.title("BTC/USD Options and Non-Equilibrium Stochastic Dynamics Analysis")
 st.markdown("""
-This application models BTC/USD options pricing under non-equilibrium conditions, capturing market instability (e.g., crashes) with a stochastic dynamics model.
+This application models BTC/USD options under non-equilibrium conditions, capturing market instability (e.g., crashes) with a stochastic dynamics model.
 - **Options Pricing**: Prices options using SVI and non-equilibrium dynamics, accounting for arbitrage opportunities.
 - **Probability Forecasts**: Estimates price ranges and support/resistance levels for risk management.
 - **Trading Signals**: Highlights mispricing (η) and volatility mismatches for arbitrage or directional trades.
@@ -41,7 +41,7 @@ RSI_BULLISH_THRESHOLD = 65
 RSI_BEARISH_THRESHOLD = 35
 
 # --- Stochastic Dynamics Simulation ---
-def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
+def simulate_non_equilibrium(S0, V0, eta0, mu, phi, v, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
     dt = T / N
     S = np.zeros((n_paths, N+1))
     V = np.zeros((n_paths, N+1))
@@ -604,7 +604,8 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             "Price": np.mean(S, axis=0),
             "Volatility": np.sqrt(np.mean(V, axis=0)),
             "Arbitrage Return": np.mean(eta, axis=0),
-            "Path": "Stochastic Mean"
+            "Path": "Stochastic Mean",
+            "ID": "Stochastic Mean"
         })
 
         # Volatility comparison
@@ -732,28 +733,23 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     st.error(f"Simulation data mismatch: t_eval length ({len(t_eval)}) != stochastic_df Price length ({len(stochastic_df['Price'])})")
                     t_eval = t_eval[:len(stochastic_df['Price'])]
 
-                price_df = pd.DataFrame({"Time": times, "Price": prices, "Path": "Historical Price"})
+                price_df = pd.DataFrame({"Time": times, "Price": prices, "Path": "Historical Price", "ID": "Historical"})
                 stochastic_df['Time'] = t_eval
                 sampled_indices = np.random.choice(2000, size=50, replace=False)
                 sampled_paths = S[sampled_indices, :]
-                path_dfs = [pd.DataFrame({"Time": t_eval, "Price": sampled_paths[i], "Path": f"Simulated Path {i+1}"}) for i in range(50)]
-                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']] + path_dfs, ignore_index=True)
+                path_dfs = [pd.DataFrame({"Time": t_eval, "Price": sampled_paths[i], "Path": "Simulated Path", "ID": str(i+1)}) for i in range(50)]
+                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path', 'ID']] + path_dfs, ignore_index=True)
 
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
                     x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
-                    color=alt.condition(
-                        alt.datum.Path == "Historical Price", alt.value("#0000FF"),
-                        alt.condition(
-                            alt.datum.Path == "Stochastic Mean", alt.value("#FFA500"),
-                            alt.value("#D3D3D3")
-                        )
-                    )
+                    color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean", "Simulated Path"], range=["#0000FF", "#FFA500", "#D3D3D3"])),
+                    detail="ID:N"
                 )
-                historical_line = base.transform_filter(alt.datum.Path == "Historical Price").mark_line(strokeWidth=3).encode(detail='Path:N')
-                stochastic_line = base.transform_filter(alt.datum.Path == "Stochastic Mean").mark_line(strokeWidth=2).encode(detail='Path:N')
-                simulated_lines = base.transform_filter(alt.datum.Path.startswith("Simulated Path")).mark_line(strokeWidth=1).encode(detail='Path:N')
+                historical_line = base.transform_filter(alt.datum.Path == "Historical Price").mark_line(strokeWidth=3)
+                stochastic_line = base.transform_filter(alt.datum.Path == "Stochastic Mean").mark_line(strokeWidth=2)
+                simulated_lines = base.transform_filter(alt.datum.Path == "Simulated Path").mark_line(strokeWidth=1)
                 orig_support_df = pd.DataFrame({"Price": [S_l_orig]})
                 orig_resistance_df = pd.DataFrame({"Price": [S_u_orig]})
                 orig_support_lines = alt.Chart(orig_support_df).mark_rule(stroke="gray", strokeWidth=1, strokeDash=[4, 4]).encode(y="Price:Q")
