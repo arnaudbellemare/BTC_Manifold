@@ -727,8 +727,8 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
 
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
-                        x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
-                        y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
+                    x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
+                    y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
                     color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"] + [f"Simulated Path {i+1}" for i in range(50)], range=["#0000FF", "#FFA500"] + ["#D3D3D3"]*50))
                 )
                 historical_line = base.transform_filter(alt.datum.Path == "Historical Price").mark_line(strokeWidth=3).encode(detail='Path:N')
