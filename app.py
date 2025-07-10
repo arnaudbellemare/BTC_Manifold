@@ -48,7 +48,7 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
     eta = np.zeros((n_paths, N+1))
     S[:, 0] = S0
     V[:, 0] = V0
-    eta[:, 0] = eta0  # Start with perturbation to test non-equilibrium
+    eta[:, 0] = eta0
 
     corr_matrix = np.array([[1.0, rho_XY, rho_XZ],
                             [rho_XY, 1.0, rho_YZ],
@@ -378,7 +378,7 @@ def calculate_probability_range(price_grid, pdf_values, confidence_level):
     unique_cdf, unique_indices = np.unique(cdf_values, return_index=True)
     unique_prices = price_grid[unique_indices]
     if len(unique_cdf) < 2:
-        return np.nan, np.nan
+        return np.nan, nan
     inverse_cdf = interp1d(unique_cdf, unique_prices, bounds_error=False, fill_value="extrapolate")
     tail_prob = (1.0 - confidence_level) / 2.0
     lower_quantile, upper_quantile = tail_prob, 1.0 - tail_prob
@@ -570,22 +570,41 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
         with col1:
             st.subheader("Price Path and Stochastic Dynamics")
             if len(times) != len(prices):
-                st.error(f"Data mismatch: times length ({len(times)}) != prices length ({len(prices)})")
+                st.warning(f"Data mismatch: Truncating times to match prices length ({len(prices)})")
                 times = times[:len(prices)]
+            if len(t_eval) != len(stochastic_df['Price']):
+                st.error(f"Simulation data mismatch: t_eval length ({len(t_eval)}) != stochastic_df Price length ({len(stochastic_df['Price'])})")
+                t_eval = t_eval[:len(stochastic_df['Price'])]
+            
             price_df = pd.DataFrame({"Time": times, "Price": prices, "Path": "Historical Price"})
             combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]], ignore_index=True)
+            
             base = alt.Chart(combined_df).encode(
-                x=alt.X("Time:Q", title="Time (days)"),
+                x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max(times.max(), ttm)])),
                 y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False)),
                 color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"], range=["blue", "orange"]))
             )
             price_line = base.mark_line(strokeWidth=2).encode(detail='Path:N')
+            
             support_df = pd.DataFrame({"Price": [S_l]})
             resistance_df = pd.DataFrame({"Price": [S_u]})
             support_lines = alt.Chart(support_df).mark_rule(stroke="green", strokeWidth=1.5).encode(y="Price:Q")
             resistance_lines = alt.Chart(resistance_df).mark_rule(stroke="red", strokeWidth=1.5).encode(y="Price:Q")
-            chart = (price_line + support_lines + resistance_lines).properties(
-                title="Price Path, Stochastic Mean, and S/R Bounds", height=500
+            
+            if pd.notna(lower_prob_range) and pd.notna(upper_prob_range):
+                prob_range_df = pd.DataFrame({
+                    'lower_bound': [lower_prob_range],
+                    'upper_bound': [upper_prob_range],
+                    'label': [f"{confidence_level:.0%} Range"]
+                })
+                prob_band = alt.Chart(prob_range_df).mark_rect(opacity=0.1, color='yellow').encode(
+                    y='lower_bound:Q',
+                    y2='upper_bound:Q'
+                ).properties(layer="back")
+            
+            chart = (prob_band + price_line + support_lines + resistance_lines).properties(
+                title="Price Path, Stochastic Mean, and S/R Bounds with Prob Range",
+                height=500
             ).interactive()
             st.altair_chart(chart, use_container_width=True)
 
