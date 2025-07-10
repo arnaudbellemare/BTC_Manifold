@@ -24,12 +24,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 st.set_page_config(layout="wide", page_icon="📊", page_title="BTC Options and Stochastic Dynamics Analysis")
 st.title("BTC/USD Options and Non-Equilibrium Stochastic Dynamics Analysis")
 st.markdown("""
-This application combines options-based probability analysis with a non-equilibrium stochastic model for BTC/USD.
-- **Options Analysis**: Implied volatility (IV) smiles and PDFs using SVI model.
-- **Stochastic Dynamics**: Models price, volatility, and arbitrage return using SDEs with non-equilibrium effects.
-- **IV/RV & Momentum**: Compares implied vs. realized volatility and includes RSI signals.
-- **Volume Profile**: Historical trading activity with S/R levels and POC.
-*Use the sidebar to adjust parameters or override calibrated values.*
+This application models BTC/USD options pricing under non-equilibrium conditions, capturing market instability (e.g., crashes) with a stochastic dynamics model.
+- **Options Pricing**: Prices options using SVI and non-equilibrium dynamics, accounting for arbitrage opportunities.
+- **Probability Forecasts**: Estimates price ranges and support/resistance levels for risk management.
+- **Trading Signals**: Highlights mispricing (η) and volatility mismatches for arbitrage or directional trades.
+- **Volume Profile**: Identifies key price levels (POC, S/R) from historical trading activity.
+*Adjust sidebar parameters to optimize model dynamics and outputs.*
 """)
 
 # --- Thalex API Configuration ---
@@ -44,47 +44,46 @@ RSI_BEARISH_THRESHOLD = 35
 def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=200):
     dt = T / N
     S = np.zeros((n_paths, N+1))
-    V = np.zeros((n_paths, N+1))
+    ln_V = np.zeros((n_paths, N+1))  # Use log-volatility
     eta = np.zeros((n_paths, N+1))
     S[:, 0] = max(S0, 1e-6)
-    V[:, 0] = max(V0, 1e-6)
+    ln_V[:, 0] = np.log(max(V0, 1e-6))
     eta[:, 0] = np.clip(eta0, -0.5, 0.5)
 
-    # Correlation matrix and Cholesky decomposition
+    # Validate correlation matrix
     corr_matrix = np.array([[1.0, rho_XY, rho_XZ],
                             [rho_XY, 1.0, rho_YZ],
                             [rho_XZ, rho_YZ, 1.0]])
-    try:
-        L = np.linalg.cholesky(corr_matrix)
-    except np.linalg.LinAlgError:
+    if not np.all(np.linalg.eigvals(corr_matrix) > 0):
         logging.warning("Correlation matrix not positive definite. Using identity matrix.")
-        L = np.eye(3)
+        corr_matrix = np.eye(3)
+    L = np.linalg.cholesky(corr_matrix)
 
     for t in range(N):
         dW = np.random.normal(0, np.sqrt(dt), (n_paths, 3))
         dW_correlated = dW @ L.T
 
         S_t = S[:, t]
-        V_t = V[:, t]
+        V_t = np.exp(ln_V[:, t])  # Convert log-volatility to volatility
         eta_t = eta[:, t]
-        eta_ratio = eta_t / eta_star
+        eta_ratio = np.clip(eta_t / eta_star, -2, 2)
         exp_eta = np.exp(np.clip(-eta_ratio**2, -700, 0))
 
-        # Price bound term as per text
+        # Price bound term
         price_bound_term = (2 * S_t / S_u - S_l / S_u - 1)**2
         exp_bound = 1 - np.exp(np.clip(-price_bound_term, -700, 0))
 
         # Mean reversion rate
         lambda_eff = lambda_ * exp_eta
 
-        # SDEs with bounds
-        mu_t = np.clip(mu * (1 - alpha * eta_ratio), -0.5, 0.5)
+        # SDEs
+        mu_t = np.clip(mu * (1 - alpha * eta_ratio), -0.3, 0.3)
         dS = mu_t * S_t * dt + np.sqrt(np.maximum(V_t, 1e-6)) * S_t * dW_correlated[:, 0]
-        dV = phi * (V0 * exp_eta - V_t) * dt + epsilon * exp_eta * np.sqrt(np.maximum(V_t, 1e-6)) * dW_correlated[:, 1]
+        d_ln_V = phi * (np.log(max(V0 * exp_eta, 1e-6)) - ln_V[:, t]) * dt + epsilon * exp_eta * dW_correlated[:, 1]
         d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
 
-        S[:, t+1] = np.clip(S_t + dS, 1e-6, 1e7)  # Increased upper bound for variability
-        V[:, t+1] = np.maximum(V_t + dV, 1e-6)
+        S[:, t+1] = np.clip(S_t + dS, 1e-6, 1e7)
+        ln_V[:, t+1] = ln_V[:, t] + d_ln_V
         eta[:, t+1] = np.clip(eta_t + d_eta, -1.0, 1.0)
 
         if t % 100 == 0:
@@ -94,7 +93,7 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
     valid_final_prices = final_prices[np.isfinite(final_prices)]
     logging.info(f"Simulation stats - Mean eta: {np.mean(eta):.4f}, Max |eta|: {np.max(np.abs(eta)):.4f}, "
                  f"Valid final prices: {len(valid_final_prices)}, Mean S_final: {np.mean(valid_final_prices):.2f}")
-    return S, V, eta
+    return S, np.exp(ln_V), eta
 
 # --- Helper Functions ---
 @st.cache_data
@@ -134,9 +133,9 @@ def fetch_kraken_data(symbol, timeframe, start_date, end_date):
     st.error("Failed to fetch Kraken data. Using simulated data.")
     sim_t = pd.date_range(start=start_date, end=end_date, freq='h')
     n = len(sim_t)
-    vol = np.random.normal(0, 0.02, n)
-    vol = 0.01 + 0.005 * np.exp(-np.arange(n)/100) * np.cumsum(vol)
-    sim_prices = 111085 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))  # Updated to match spot price
+    vol = np.random.normal(0, 0.03, n)
+    vol = 0.02 + 0.01 * np.exp(-np.arange(n)/100) * np.cumsum(vol)
+    sim_prices = 111085 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))
     logging.warning("Using simulated Kraken data with initial price 111085")
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'volume': np.random.randint(50, 200, n)})
 
@@ -215,12 +214,12 @@ def get_thalex_ticker(instrument_name: str):
         return None
 
 def simulate_options_data(coin: str) -> pd.DataFrame:
-    strikes = np.linspace(90000, 130000, 20)  # Adjusted to center around spot price
+    strikes = np.linspace(90000, 130000, 20)
     types = ['C', 'P']
     sim_data = []
     for s in strikes:
         for t in types:
-            iv = 0.6 + np.random.normal(0, 0.1)
+            iv = 0.7 + np.random.normal(0, 0.15)
             price = s * iv * 0.05
             sim_data.append({
                 'instrument': f"{coin}-{s}-{t}",
@@ -352,7 +351,7 @@ def calibrate_raw_svi(market_ivs, market_strikes, F, T, initial_params_dict=None
               initial_params_dict['m'], initial_params_dict['sigma']]
     else:
         atm_total_var_approx = np.interp(0, market_ks, market_ivs**2 * T, left=(market_ivs[0]**2*T), right=(market_ivs[-1]**2*T))
-        p0 = [atm_total_var_approx * 0.9, 0.15, -0.4, 0.0, 0.2]  # Adjusted b for higher volatility
+        p0 = [atm_total_var_approx * 0.9, 0.15, -0.4, 0.0, 0.2]
     bounds = [(None, None), (1e-5, 2.0/T if T > 0 else 20.0), (-0.999, 0.999), (-2.0, 2.0), (1e-4, 3.0)]
     result = minimize(svi_objective_function, p0, args=(market_ivs, market_ks, T, F, weights),
                      method='L-BFGS-B', bounds=bounds, options={'ftol': 1e-8, 'gtol': 1e-6, 'maxiter': 500})
@@ -478,7 +477,7 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, 
 
 # --- Sidebar Configuration ---
 st.sidebar.header("Model Parameters")
-days_history = st.sidebar.slider("Historical Data (Days)", 7, 90, 30)
+days_history = st.sidebar.slider("Historical Data (Days)", 7, 180, 90)  # Extended for better calibration
 epsilon_factor = st.sidebar.slider("S/R Zone Width Factor", 0.1, 2.0, 0.5, step=0.05)
 st.session_state['profitability_threshold'] = st.sidebar.slider("Profitability Confidence Interval (%)", 68, 99, 68, step=1) / 100.0
 
@@ -494,27 +493,27 @@ if df is not None and len(df) > 10:
     times = (times_pd - times_pd.iloc[0]).dt.total_seconds() / (24 * 3600)
     T = times.iloc[-1] if not times.empty else 1.0
     returns = 100 * df['close'].pct_change().dropna()
-    current_price = df['close'].iloc[-1] if not df['close'].empty else 111085  # Updated to match spot price
+    current_price = df['close'].iloc[-1] if not df['close'].empty else 111085
     log_returns = np.log(df['close'] / df['close'].shift(1)).dropna()
-    mu = log_returns.mean() * 365 if not log_returns.empty else 0.1  # Increased for variability
+    mu = log_returns.mean() * 365 if not log_returns.empty else 0.2
     try:
         model = arch_model(returns, vol='Garch', p=1, q=1).fit(disp='off', show_warning=False)
         V0 = (model.conditional_volatility[-1] / 100) ** 2 if model.convergence_flag == 0 else 0.04
-        phi = 1 - (model.params['alpha[1]'] + model.params['beta[1]']) if model.convergence_flag == 0 else 1.0
+        phi = 1 - (model.params['alpha[1]'] + model.params['beta[1]']) if model.convergence_flag == 0 else 0.5
         sigma = model.conditional_volatility / 100
-        epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.15  # Increased for variability
+        epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.12
         logging.info(f"GARCH fit successful - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
     except Exception as e:
         V0 = (returns.std() / 100) ** 2 if not returns.empty else 0.04
-        phi = 1.0
-        epsilon = 0.15  # Increased for variability
+        phi = 0.5
+        epsilon = 0.12
         sigma = np.full_like(returns, returns.std() / 100 if not returns.empty else 0.02)
         logging.warning(f"GARCH fit failed: {e}. Using fallback - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
     lambda_ = np.log(2) / 1.0
-    chi = 0.02  # Increased for variability
-    alpha = 0.7  # Increased for stronger mispricing impact
+    chi = 0.015
+    alpha = 0.6
     eta_star = 0.09
-    kappa = 0.1
+    kappa = 0.05
     if len(sigma) > len(log_returns):
         sigma = sigma[-len(log_returns):]
     elif len(sigma) < len(log_returns):
@@ -527,14 +526,14 @@ if df is not None and len(df) > 10:
 st.sidebar.header("Stochastic Dynamics Parameters (Override)")
 override_params = st.sidebar.checkbox("Manually Override Parameters", value=False)
 if override_params:
-    mu = st.sidebar.slider("Price Drift (μ)", 0.0, 0.3, mu, step=0.01)  # Wider range
+    mu = st.sidebar.slider("Price Drift (μ)", 0.0, 0.3, mu, step=0.01)
     phi = st.sidebar.slider("Volatility Mean Reversion (φ)", 0.1, 2.0, phi, step=0.1)
-    epsilon = st.sidebar.slider("Volatility of Volatility (ε)", 0.01, 0.3, epsilon, step=0.01)  # Wider range
+    epsilon = st.sidebar.slider("Volatility of Volatility (ε)", 0.01, 0.2, epsilon, step=0.01)
     lambda_ = st.sidebar.slider("Arbitrage Mean Reversion (λ)", 0.1, 2.0, lambda_, step=0.1)
-    chi = st.sidebar.slider("Arbitrage Volatility (χ)", 0.005, 0.1, chi, step=0.005)  # Wider range
+    chi = st.sidebar.slider("Arbitrage Volatility (χ)", 0.005, 0.05, chi, step=0.005)
     alpha = st.sidebar.slider("Mispricing Impact (α)", 0.1, 1.0, alpha, step=0.1)
     eta_star = st.sidebar.slider("Mispricing Threshold (η*)", 0.01, 0.2, eta_star, step=0.01)
-    kappa = st.sidebar.slider("Arbitrage Revival (κ)", 0.01, 0.5, kappa, step=0.01)
+    kappa = st.sidebar.slider("Arbitrage Revival (κ)", 0.01, 0.3, kappa, step=0.01)
     rho_XY = st.sidebar.slider("Price-Volatility Correlation (ρ_XY)", -0.5, 0.5, rho_XY, step=0.05)
     rho_XZ = st.sidebar.slider("Price-Arbitrage Correlation (ρ_XZ)", -0.5, 0.5, rho_XZ, step=0.05)
     rho_YZ = st.sidebar.slider("Volatility-Arbitrage Correlation (ρ_YZ)", -0.5, 0.5, rho_YZ, step=0.05)
@@ -583,6 +582,17 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             "Arbitrage Return": np.mean(eta, axis=0),
             "Path": "Stochastic Mean"
         })
+
+        # Volatility comparison
+        realized_vol = np.std(log_returns) * np.sqrt(365) if not log_returns.empty else np.sqrt(V0)
+        st.subheader("Volatility Analysis")
+        vol_cols = st.columns(2)
+        vol_cols[0].metric("Implied Volatility (ATM)", f"{atm_iv:.2%}")
+        vol_cols[1].metric("Realized Volatility (Historical)", f"{realized_vol:.2%}")
+        if atm_iv > realized_vol * (1 + Z_SCORE_HIGH_IV_THRESHOLD):
+            st.warning("Implied volatility significantly higher than realized: Potential overpricing or expected market stress.")
+        elif atm_iv < realized_vol * (1 + Z_SCORE_LOW_IV_THRESHOLD):
+            st.warning("Implied volatility significantly lower than realized: Potential underpricing or market stability.")
 
         # Derive cluster-based S_l and S_u
         final_prices = S[:, -1]
@@ -647,7 +657,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 st.warning("Insufficient valid final prices for KDE. Using normal distribution fallback.")
                 logging.warning(f"Final prices count: {len(final_prices)}. Using normal fallback.")
                 mean_price = spot_price * np.exp(mu * ttm)
-                std_price = spot_price * np.sqrt(V0) * np.sqrt(ttm) * 1.5  # Increased spread
+                std_price = spot_price * np.sqrt(V0) * np.sqrt(ttm) * 2.5
                 final_prices = np.random.normal(mean_price, std_price, 1000)
                 final_prices = final_prices[final_prices > 0]
             u = np.zeros_like(price_grid)
