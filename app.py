@@ -75,6 +75,7 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         V[:, t+1] = np.maximum(V_t + dV, 1e-6)
         eta[:, t+1] = eta_t + d_eta
 
+    logging.info(f"Simulation stats - Mean eta: {np.mean(eta):.4f}, Max |eta|: {np.max(np.abs(eta)):.4f}")
     return S, V, eta
 
 # --- Helper Functions ---
@@ -114,13 +115,13 @@ def fetch_kraken_data(symbol, timeframe, start_date, end_date):
     n = len(sim_t)
     vol = np.random.normal(0, 0.02, n)
     vol = 0.01 + 0.005 * np.exp(-np.arange(n)/100) * np.cumsum(vol)
-    sim_prices = 70000 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))
+    sim_prices = 65000 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))  # Adjusted for 2025 BTC price
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'volume': np.random.randint(50, 200, n)})
 
 @st.cache_data(ttl=300)
 def get_thalex_instruments():
     url = f"{THALEX_BASE_URL}/public/instruments"
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=20))
     def fetch():
         response = requests.get(url, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
@@ -139,7 +140,7 @@ def get_thalex_instruments():
 
 def simulate_instruments():
     return [
-        {"instrument_name": f"BTC-{d}-50000-C", "type": "option"} for d in ["31DEC25", "31MAR26"]
+        {"instrument_name": f"BTC-{d}-65000-C", "type": "option"} for d in ["31DEC25", "31MAR26"]
     ]
 
 @st.cache_data(ttl=300)
@@ -190,12 +191,12 @@ def get_thalex_ticker(instrument_name: str):
         return None
 
 def simulate_options_data(coin: str) -> pd.DataFrame:
-    strikes = np.linspace(60000, 100000, 20)
+    strikes = np.linspace(55000, 75000, 20)  # Adjusted for 2025 price range
     types = ['C', 'P']
     sim_data = []
     for s in strikes:
         for t in types:
-            iv = 0.5 + np.random.normal(0, 0.1)
+            iv = 0.6 + np.random.normal(0, 0.1)  # Higher IV for volatility in 2025
             price = s * iv * 0.05
             sim_data.append({
                 'instrument': f"{coin}-{s}-{t}",
@@ -257,7 +258,6 @@ class BlackScholes:
             put_price = self.K * np.exp(-self.r * self.T) * norm.cdf(-self.d2) - self.S * norm.cdf(-self.d1)
         return max(0, call_price), max(0, put_price)
 
-# --- SVI Functions ---
 def raw_svi_total_variance(k, params):
     a, b, rho, m, sigma = params['a'], params['b'], params['rho'], params['m'], params['sigma']
     b = max(0, b)
@@ -470,7 +470,7 @@ if df is not None and len(df) > 10:
     times = (times_pd - times_pd.iloc[0]).dt.total_seconds() / (24 * 3600)
     T = times.iloc[-1] if not times.empty else 1.0
     returns = 100 * df['close'].pct_change().dropna()
-    current_price = df['close'].iloc[-1] if not df['close'].empty else 70000
+    current_price = df['close'].iloc[-1] if not df['close'].empty else 65000  # Adjusted for 2025
     log_returns = np.log(df['close'] / df['close'].shift(1)).dropna()
     mu = log_returns.mean() * 365 if not log_returns.empty else 0.05
     try:
@@ -479,25 +479,26 @@ if df is not None and len(df) > 10:
         phi = 1 - (model.params['alpha[1]'] + model.params['beta[1]']) if model.convergence_flag == 0 else 1.0
         sigma = model.conditional_volatility / 100
         epsilon = sigma.std() * np.sqrt(365) if len(sigma) > 1 else 0.2
-    except:
+        logging.info(f"GARCH fit successful - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
+    except Exception as e:
         V0 = (returns.std() / 100) ** 2 if not returns.empty else 0.04
         phi = 1.0
         epsilon = 0.2
-        sigma = np.full_like(returns, returns.std() / 100 if not returns.empty else 0.02)  # Fallback
+        sigma = np.full_like(returns, returns.std() / 100 if not returns.empty else 0.02)
+        logging.warning(f"GARCH fit failed: {e}. Using fallback - V0: {V0:.4f}, phi: {phi:.4f}, epsilon: {epsilon:.4f}")
     lambda_ = np.log(2) / 1.0
     chi = 0.1 * epsilon
     alpha = 0.5
     eta_star = 0.09
     kappa = 0.1
-    # Ensure compatible lengths for correlation
     if len(sigma) > len(log_returns):
         sigma = sigma[-len(log_returns):]
     elif len(sigma) < len(log_returns):
         sigma = np.pad(sigma, (0, len(log_returns) - len(sigma)), mode='edge')
     rho_XY = np.corrcoef(log_returns, sigma)[0, 1] if len(log_returns) > 1 and len(sigma) > 1 and not np.isnan(sigma).all() else 0.3
+    logging.info(f"Correlation data - log_returns len: {len(log_returns)}, sigma len: {len(sigma)}, rho_XY: {rho_XY:.4f}")
     rho_XZ = 0.2
     rho_YZ = 0.0
-
 
 st.sidebar.header("Stochastic Dynamics Parameters (Override)")
 override_params = st.sidebar.checkbox("Manually Override Parameters", value=False)
@@ -561,6 +562,9 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
         col1, col2 = st.columns([2, 1])
         with col1:
             st.subheader("Price Path and Stochastic Dynamics")
+            if len(times) != len(prices):
+                st.error(f"Data mismatch: times length ({len(times)}) != prices length ({len(prices)})")
+                times = times[:len(prices)]
             price_df = pd.DataFrame({"Time": times, "Price": prices, "Path": "Historical Price"})
             combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path']]], ignore_index=True)
             base = alt.Chart(combined_df).encode(
@@ -666,7 +670,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     support_data = pd.DataFrame({'Level': support_levels, 'Hit %': support_probs})
                     st.dataframe(support_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
 
-                with sub_col2:
+                with col2:
                     st.markdown("**Resistance Levels**")
                     resistance_data = pd.DataFrame({'Level': resistance_levels, 'Hit %': resistance_probs})
                     st.dataframe(resistance_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
@@ -685,25 +689,6 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 st.metric("Point of Control (POC)", f"${poc['price_bin']:,.2f}")
                 st.metric("Current Price", f"${current_price:,.2f}")
 
-            # Options Chain and other sections remain as in original code
             # [Add options chain, IV/RV, RSI, and export sections as needed]
-
-                # Volume Profile, IV/RV, RSI, and Options Chain
-                # [Retain existing code for these sections, as they are compatible]
-
-                # Export Results
-                st.header("Export Results")
-                export_button = st.button("Download Charts and Data")
-                if export_button:
-                    with st.spinner("Generating exports..."):
-                        chart.save("price_chart.html")
-                        with open("price_chart.html", "rb") as f:
-                            st.download_button("Download Price Chart", f, file_name="price_chart.html")
-                        if interactive_density_fig:
-                            interactive_density_fig.write_html("density_chart.html")
-                            with open("density_chart.html", "rb") as f:
-                                st.download_button("Download Density Chart", f, file_name="density_chart.html")
-                        # [Add other exports as in original code]
-
 else:
     st.error("Could not load or process spot data. Check parameters or try again.")
