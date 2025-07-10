@@ -278,19 +278,6 @@ if df is not None and len(df) > 10:
 
         with st.spinner("Simulating price paths..."):
             paths, t = simulate_paths(p0, mu, sigma, T, N, n_paths)
-            t = t / 24  # Changed to days, but since T is now in days, adjust if needed? Wait, no - wait, let's check.
-
-Wait, in simulate_paths, dt = T / (N - 1), T now in days, but mu and sigma are hourly.
-
-To fix, since returns are hourly, for daily dt =1 day =24 hours, mu_daily = mu * 24, sigma_daily = sigma * sqrt(24)
-
-But since N = len(prices) = number of hours, but T in days =30, N=720, dt =30 /719 ~0.041 days =1 hour, so mu * dt is hourly mu * hour, but mu is hourly mean, so correct.
-
-No change needed for simulation.
-
-But for t, t = np.linspace(0, T, N), T days, so t in days.
-
-Yes.
 
         col1, col2 = st.columns([2, 1])
         with col1:
