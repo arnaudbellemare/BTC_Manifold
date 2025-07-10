@@ -740,8 +740,9 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path', 'ID']]] + path_dfs, ignore_index=True)
 
                 max_time = max(times.max() if len(times) > 0 else 0, ttm * 365.25)
+                min_time = min(times.min() if len(times) > 0 else 0, 0)  # New: Include negative historical range
                 base = alt.Chart(combined_df).encode(
-                    x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
+                    x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[min_time - 1, max_time + 1])),  # Updated domain to cover negatives
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
                     color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean", "Simulated Path"], range=["#0000FF", "#FFA500", "#D3D3D3"])),
                     detail="ID:N"
