@@ -41,7 +41,7 @@ RSI_BULLISH_THRESHOLD = 65
 RSI_BEARISH_THRESHOLD = 35
 
 # --- Stochastic Dynamics Simulation ---
-def simulate_non_equilibrium(S0, V0, eta0, mu, phi, v, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
+def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
     dt = T / N
     S = np.zeros((n_paths, N+1))
     V = np.zeros((n_paths, N+1))
@@ -738,7 +738,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 sampled_indices = np.random.choice(2000, size=50, replace=False)
                 sampled_paths = S[sampled_indices, :]
                 path_dfs = [pd.DataFrame({"Time": t_eval, "Price": sampled_paths[i], "Path": "Simulated Path", "ID": str(i+1)}) for i in range(50)]
-                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path', 'ID']] + path_dfs, ignore_index=True)
+                combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path', 'ID']]] + path_dfs, ignore_index=True)
 
                 max_time = max(times.max() if len(times) > 0 else 0, ttm)
                 base = alt.Chart(combined_df).encode(
