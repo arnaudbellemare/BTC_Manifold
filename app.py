@@ -40,8 +40,8 @@ Z_SCORE_LOW_IV_THRESHOLD = -1.0
 RSI_BULLISH_THRESHOLD = 65
 RSI_BEARISH_THRESHOLD = 35
 
-# --- Stochastic Dynamics Simulation ---
-def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000):
+# --- Stochastic Dynamics Simulation with Farmer's Term ---
+def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha, eta_star, S_u, S_l, kappa, rho_XY, rho_XZ, rho_YZ, T, N, n_paths=2000, liquidity_lambda=500):
     dt = T / N
     S = np.zeros((n_paths, N+1))
     V = np.zeros((n_paths, N+1))
@@ -81,9 +81,11 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         # Mean reversion rate
         lambda_eff = lambda_ * exp_eta
 
-        # SDEs
+        # SDEs with Farmer's term (market impact: N ~ eta_ratio as proxy for order imbalance)
         mu_t = np.clip(mu * (1 - alpha * eta_ratio), -0.3, 0.3)
-        dS = mu_t * S_t * dt + np.sqrt(np.maximum(V_t, 1e-6)) * S_t * dW_correlated[:, 0]
+        N_impact = eta_ratio * 10  # Scale arbitrarily; adjust based on liquidity
+        farmer_term = N_impact / liquidity_lambda  # From eq. 24: log(S'/S) = N / λ
+        dS = (mu_t * S_t + farmer_term * S_t) * dt + np.sqrt(np.maximum(V_t, 1e-6)) * S_t * dW_correlated[:, 0]
         dV = phi * (np.maximum(V0 * exp_eta, 1e-6) - V_t) * dt + epsilon * exp_eta * np.sqrt(np.maximum(V_t, 1e-6)) * dW_correlated[:, 1]
         d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
 
@@ -479,7 +481,7 @@ def create_volume_profile_chart(df, s_levels, r_levels, epsilon, current_price, 
         xaxis_title="Volume Traded",
         yaxis_title="Price (USD)",
         template="plotly_white",
-        height=600  # Increased height
+        height=400
     )
     return fig, poc
 
