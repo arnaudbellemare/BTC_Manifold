@@ -730,8 +730,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
                     color=alt.Color("Path:N", scale=alt.Scale(domain=["Historical Price", "Stochastic Mean"] + [f"Simulated Path {i+1}" for i in range(50)], range=["blue", "orange"] + ["gray"]*50)),
-                    opacity=alt.condition(alt.datum.Path == "Historical Price", alt.value(1.0), alt.condition(alt.datum.Path == "Stochastic Mean", alt.value(0.8), alt.value(0.05)))
-                )
+                    opacity=alt.condition((alt.datum.Path == "Historical Price"), alt.value(1.0),alt.condition((alt.datum.Path == "Stochastic Mean"), alt.value(0.8), alt.value(0.05)))
                 price_line = base.mark_line(strokeWidth=2, interpolate='linear').encode(detail='Path:N')
                 orig_support_df = pd.DataFrame({"Price": [S_l_orig]})
                 orig_resistance_df = pd.DataFrame({"Price": [S_u_orig]})
