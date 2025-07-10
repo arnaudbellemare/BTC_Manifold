@@ -493,7 +493,7 @@ with st.spinner("Fetching Kraken BTC/USD data..."):
 if df is not None and len(df) > 10:
     prices = df['close'].values
     times_pd = df['datetime']
-    times = (times_pd - times_pd.iloc[0]).dt.total_seconds() / (24 * 3600)
+    times = (times_pd - times_pd.iloc[-1]).dt.total_seconds() / (24 * 3600)
     T = times.iloc[-1] if not times.empty else 1.0
     returns = 100 * df['close'].pct_change().dropna()
     current_price = df['close'].iloc[-1] if not df['close'].empty else 111000
@@ -597,6 +597,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
             )
 
         t_eval = np.linspace(0, ttm, N + 1)
+        t_eval_days = t_eval * 365.25  # Convert years to approximate days
         stochastic_df = pd.DataFrame({
             "Time": t_eval,
             "Price": np.mean(S, axis=0),
@@ -738,7 +739,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                 path_dfs = [pd.DataFrame({"Time": t_eval, "Price": sampled_paths[i], "Path": "Simulated Path", "ID": str(i+1)}) for i in range(50)]
                 combined_df = pd.concat([price_df, stochastic_df[['Time', 'Price', 'Path', 'ID']]] + path_dfs, ignore_index=True)
 
-                max_time = max(times.max() if len(times) > 0 else 0, ttm)
+                max_time = max(times.max() if len(times) > 0 else 0, ttm * 365.25)
                 base = alt.Chart(combined_df).encode(
                     x=alt.X("Time:Q", title="Time (days)", scale=alt.Scale(domain=[0, max_time + 1])),
                     y=alt.Y("Price:Q", title="BTC/USD Price", scale=alt.Scale(zero=False, domain=[min(S_l_orig, S_l)-10000, max(S_u_orig, S_u)+10000])),
