@@ -48,7 +48,7 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
     eta = np.zeros((n_paths, N+1))
     S[:, 0] = S0
     V[:, 0] = V0
-    eta[:, 0] = eta0
+    eta[:, 0] = eta0  # Start with perturbation to test non-equilibrium
 
     corr_matrix = np.array([[1.0, rho_XY, rho_XZ],
                             [rho_XY, 1.0, rho_YZ],
@@ -67,15 +67,16 @@ def simulate_non_equilibrium(S0, V0, eta0, mu, phi, epsilon, lambda_, chi, alpha
         price_bound_term = (2 * S_t / S_u - S_l / S_u - 1)**2 / (1 - (2 * S_t / S_u - S_l / S_u - 1)**2 + 1e-6)
         exp_bound = 1 - np.exp(-price_bound_term)
 
+        lambda_eff = lambda_ * exp_eta if np.abs(eta_t) <= eta_star else lambda_ * 0.1 * exp_eta
         dS = mu * (1 - alpha * eta_ratio) * S_t * dt + np.sqrt(V_t) * S_t * dW_correlated[:, 0]
         dV = phi * (V0 * exp_eta - V_t) * dt + epsilon * exp_eta * np.sqrt(V_t) * dW_correlated[:, 1]
-        d_eta = (-lambda_ * eta_t * exp_eta + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
+        d_eta = (-lambda_eff * eta_t + kappa * exp_bound) * dt + chi * dW_correlated[:, 2]
 
         S[:, t+1] = S_t + dS
         V[:, t+1] = np.maximum(V_t + dV, 1e-6)
         eta[:, t+1] = eta_t + d_eta
 
-    logging.info(f"Simulation stats - Mean eta: {np.mean(eta):.4f}, Max |eta|: {np.max(np.abs(eta)):.4f}")
+    logging.info(f"Simulation stats - Mean eta: {np.mean(eta):.4f}, Max |eta|: {np.max(np.abs(eta)):.4f}, Non-eq count: {np.sum(np.abs(eta) > eta_star)}")
     return S, V, eta
 
 # --- Helper Functions ---
@@ -96,11 +97,13 @@ def fetch_kraken_data(symbol, timeframe, start_date, end_date):
                 all_ohlcv.extend(ohlcv)
                 since = int(ohlcv[-1][0]) + timeframe_seconds * 1000
                 progress_bar.progress(min(1.0, since / (end_date.timestamp() * 1000)))
+                logging.info(f"Kraken fetch attempt {attempt+1} succeeded at timestamp {since}")
                 time.sleep(3)
                 break
             except Exception as e:
                 if attempt == max_retries - 1:
-                    st.warning(f"Failed to fetch Kraken data: {e}")
+                    st.warning(f"Failed to fetch Kraken data after {max_retries} attempts: {e}")
+                    logging.error(f"Kraken fetch failed: {e}")
                     break
                 time.sleep(2 ** (attempt + 2))
     progress_bar.empty()
@@ -109,13 +112,15 @@ def fetch_kraken_data(symbol, timeframe, start_date, end_date):
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df = df[(df['datetime'] >= start_date) & (df['datetime'] <= end_date)].dropna()
         if len(df) >= 10:
+            logging.info(f"Kraken data fetched: {len(df)} records")
             return df
     st.error("Failed to fetch Kraken data. Using simulated data.")
     sim_t = pd.date_range(start=start_date, end=end_date, freq='h')
     n = len(sim_t)
     vol = np.random.normal(0, 0.02, n)
     vol = 0.01 + 0.005 * np.exp(-np.arange(n)/100) * np.cumsum(vol)
-    sim_prices = 65000 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))  # Adjusted for 2025 BTC price
+    sim_prices = 65000 * np.exp(np.cumsum(vol * np.random.normal(0, 1, n)))
+    logging.warning("Using simulated Kraken data with initial price 65000")
     return pd.DataFrame({'datetime': sim_t, 'close': sim_prices, 'volume': np.random.randint(50, 200, n)})
 
 @st.cache_data(ttl=300)
@@ -125,7 +130,9 @@ def get_thalex_instruments():
     def fetch():
         response = requests.get(url, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        logging.info(f"Thalex API response: {data.get('result', 'No result key')[:100]}...")
+        return data
     try:
         data = fetch()
         instruments = data.get("result", [])
@@ -191,12 +198,12 @@ def get_thalex_ticker(instrument_name: str):
         return None
 
 def simulate_options_data(coin: str) -> pd.DataFrame:
-    strikes = np.linspace(55000, 75000, 20)  # Adjusted for 2025 price range
+    strikes = np.linspace(55000, 75000, 20)
     types = ['C', 'P']
     sim_data = []
     for s in strikes:
         for t in types:
-            iv = 0.6 + np.random.normal(0, 0.1)  # Higher IV for volatility in 2025
+            iv = 0.6 + np.random.normal(0, 0.1)
             price = s * iv * 0.05
             sim_data.append({
                 'instrument': f"{coin}-{s}-{t}",
@@ -470,7 +477,7 @@ if df is not None and len(df) > 10:
     times = (times_pd - times_pd.iloc[0]).dt.total_seconds() / (24 * 3600)
     T = times.iloc[-1] if not times.empty else 1.0
     returns = 100 * df['close'].pct_change().dropna()
-    current_price = df['close'].iloc[-1] if not df['close'].empty else 65000  # Adjusted for 2025
+    current_price = df['close'].iloc[-1] if not df['close'].empty else 65000
     log_returns = np.log(df['close'] / df['close'].shift(1)).dropna()
     mu = log_returns.mean() * 365 if not log_returns.empty else 0.05
     try:
@@ -545,7 +552,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
 
         with st.spinner("Simulating stochastic price paths..."):
             S, V, eta = simulate_non_equilibrium(
-                S0=spot_price, V0=V0, eta0=0.0, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
+                S0=spot_price, V0=V0, eta0=0.05, mu=mu, phi=phi, epsilon=epsilon, lambda_=lambda_,
                 chi=chi, alpha=alpha, eta_star=eta_star, S_u=S_u, S_l=S_l, kappa=kappa,
                 rho_XY=rho_XY, rho_XZ=rho_XZ, rho_YZ=rho_YZ, T=ttm, N=252
             )
@@ -670,7 +677,7 @@ if df is not None and len(df) > 10 and sel_expiry and run_btn:
                     support_data = pd.DataFrame({'Level': support_levels, 'Hit %': support_probs})
                     st.dataframe(support_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
 
-                with col2:
+                with sub_col2:
                     st.markdown("**Resistance Levels**")
                     resistance_data = pd.DataFrame({'Level': resistance_levels, 'Hit %': resistance_probs})
                     st.dataframe(resistance_data.style.format({'Level': '${:,.2f}', 'Hit %': '{:.1%}'}))
